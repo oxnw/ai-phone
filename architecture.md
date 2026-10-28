@@ -632,7 +632,7 @@ Downloads what the config needs and is not on this Mac yet (§5.5), for the tier
 - **Unit tests:** installs dependencies and builds the native binding through `scripts/install.sh`, then runs
   `env -u NO_COLOR uv run pytest tests/unit -q`.
 - **Local SIP smoke:** builds the same binding and uses Homebrew's `pjsua` for the echo, fake-model daemon and
-  incoming-cancellation tests. Test daemons use temporary configurations and loopback SIP on port 5080.
+  incoming-cancellation and call-ending tests. Test daemons use temporary configurations and loopback SIP on port 5080.
 
 Both jobs use `macos-15` and Python 3.13. Test steps set Hugging Face offline mode; the workflow does not download
 model weights, use subscription brains, register a carrier or place a real call. These checks cover one Python
@@ -1007,7 +1007,7 @@ The result of a call:
                 {"who": "them", "text": "Sure, what name?", "at": 1789600009.8, "interrupted": false}]}
 ```
 
-Times are Unix seconds; `duration_sec` runs from answer to end (null if the call was never answered). `outcome` is `completed`, `busy`, `no_answer`, `rejected`, `redirected` or `cancelled`. `ended_by` is `agent` (the model wrote the end marker), `them`, `timeout` (the relay reply timeout), `silence`, `max_duration`, `hangup_command`, or `error` (RTP timeout, a second brain error in a row, a model worker that died, ai-phone stopping, the `call` command failing; `detail` names it). An outbound call that was never answered has `ended_by` null, with these exceptions: `hangup_command` when `hangup` cancelled it (outcome `cancelled`); `error` when ai-phone stopped (outcome `cancelled`) or the `call` handler failed (outcome `rejected`). An incoming call that ends before its audio starts has `ended_by: them` and `answered_at` null. The transcript holds one entry per line spoken: the disclosure and the model's opening sentence are two `agent` entries.
+Times are Unix seconds; `duration_sec` runs from answer to end (null if the call was never answered). `outcome` is `completed`, `busy`, `no_answer`, `rejected`, `redirected` or `cancelled`. `ended_by` is `agent` (the model's closing reply passed end-marker validation), `them`, `timeout` (the relay reply timeout), `silence`, `max_duration`, `hangup_command`, or `error` (RTP timeout, a second brain error in a row, a model worker that died, ai-phone stopping, the `call` command failing; `detail` names it). An outbound call that was never answered has `ended_by` null, with these exceptions: `hangup_command` when `hangup` cancelled it (outcome `cancelled`); `error` when ai-phone stopped (outcome `cancelled`) or the `call` handler failed (outcome `rejected`). An incoming call that ends before its audio starts has `ended_by: them` and `answered_at` null. The transcript holds one entry per line spoken: the disclosure and the model's opening sentence are two `agent` entries.
 
 | Exit code | Meaning |
 |---|---|
@@ -1049,14 +1049,16 @@ Incoming calls: when a relay listener is waiting and no call is in progress, the
 
 The model's system prompt is, in order:
 
-1. `PHONE_INSTRUCTIONS`, fixed text in code: an AI assistant speaking on a live phone call; short, natural sentences, one or two at a time; no lists, markdown, emoji or stage directions; no invented facts, and say so plainly when something is not known; when the purpose of the call is done or the other person says goodbye, a short goodbye that ends with `[END]`;
+1. `PHONE_INSTRUCTIONS`, fixed text in code: an AI assistant speaking on a live phone call; short, natural sentences, one or two at a time; no lists, markdown, emoji or stage directions; no invented facts, and say so plainly when something is not known; when the purpose of the call is done or the other person says goodbye, a final "Goodbye." followed by one `[END]`; ordinary replies and questions must not carry the marker;
 2. for the local brain only, the host line (`You are running on <hostname> (<machine>).`);
 3. the header "This call:";
 4. the call's section: on an outbound call the `--prompt` text, or, without one, "You are calling on behalf of the owner of this phone number. Be polite and brief."; on an incoming call `inbound.instructions`, or, when that is blank, the default instructions (find out who is calling and what they need, and offer to take a message). An incoming call never gets the outbound default.
 
 The LLM worker caches parts 1 to 3. At warm-up it tokenises the prompt with two probe sections that differ from their first character, evaluates their common token prefix once and keeps that snapshot; each turn starts from a copy of it and evaluates only the call's section, the history and the new turn. Each turn therefore pays for the call's own section and the history, never for the fixed instructions. A remote brain receives the same prompt without the host line.
 
-The end marker: the clause chunker removes `[END]`, in any letter case, from what is spoken, and never speaks a fragment of it. When the model's reply contained the marker, the controller lets the reply play in full, then ends the call with `ended_by: agent`.
+The end marker: the clause chunker removes [END], in any letter case, from what is spoken, and never speaks a fragment of it. A marker alone does not authorize a hangup. The controller requires exactly one terminal marker, no question in the reply, and a complete final closing sentence such as "Goodbye.", "Thanks, bye." or "Goodbye, thanks." before ending with ended_by: agent after all audio drains. Ordinary replies, empty replies, quoted or negated farewell phrases, and markers followed by more text keep the line open. Explicit hangup commands and existing timeout/error handling retain their own end reasons.
+
+This is a conservative check of reply structure, not a determination that the call's goal has actually been completed. A model that incorrectly says a valid goodbye can still end the call. Unknown closing phrases leave the call connected; the prompt asks for an explicit final "Goodbye." to avoid relying on a broad keyword match. A caller farewell is not required, so an agent can still close a completed outbound task.
 
 ### 14b.5 Openings
 

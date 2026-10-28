@@ -18,6 +18,7 @@ import numpy as np
 from ai_phone.config import CallsConfig, ConversationConfig
 from ai_phone.pipeline.bargein import BargeInDetector
 from ai_phone.pipeline.chunker import ClauseChunker, remove_end_marker
+from ai_phone.pipeline.ending import is_closing_reply
 from ai_phone.pipeline.prompts import OPENING_CUE
 from ai_phone.pipeline.replies import ModelReplies, Phrase, RelayPhrases, ReplySource
 from ai_phone.pipeline.timing import TurnTimer
@@ -687,7 +688,10 @@ class TurnController:
         self.timer = None
         self._brain_errors = 0  # a completed turn ends the streak
         self.last_activity_ns = time.monotonic_ns()
-        model_ended = self.chunker.ended and self._say_active is None  # a marker in say text is removed, not obeyed
+        # A stray marker in an ordinary answer must not disconnect the caller. A marker in say text
+        # is still removed without being obeyed; explicit hangup commands retain their own end reason.
+        model_ended = (self.chunker.ended and self._say_active is None
+                       and is_closing_reply("".join(self._reply_parts)))
         end = self._end_after_reply or ("agent" if model_ended else None)
         self._resolve_active_say("said")
         self._end_after_reply = None

@@ -74,4 +74,5 @@ jobs:
           tests/integration/test_echo_call.py
           tests/integration/test_daemon_smoke.py
           tests/integration/test_incoming_cancel.py
+          tests/integration/test_call_ending.py
           -q
