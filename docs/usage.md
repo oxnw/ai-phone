@@ -134,7 +134,19 @@ A phone agent `call` blocks until the call ends, which can take up to `conversat
 `{"event": "created", "call_id": "c7f3a2"}`. If your agent's shell kills the command before the call ends, the call
 carries on. Take the ID from that `created` line and run `ai-phone listen --call c7f3a2 --json` once the call is over;
 it prints the result with the transcript. While the call is still going, that `listen` exits 11 at once, so wait and try
-again (`ai-phone status` shows the call while it is up). The daemon keeps the last 20 calls.
+again (`ai-phone status` shows the call while it is up). The daemon keeps the current call and the last 20 ended calls in memory; restarting it forgets those records.
+
+### Transcripts and saved call results
+
+The turn log is separate from the in-memory call records. By default, its text and timing entries are stored at `~/Library/Logs/ai-phone/turns.jsonl`. Set `log.dir` in the config to change that directory. `AI_PHONE_HOME` relocates settings and state under `~/.ai-phone`, but does not move a configured log directory. The turn log contains transcribed and spoken text with timings; it is not an audio recording or a complete export of a call record. It remains on disk when the daemon restarts.
+
+A completed phone-agent `call` prints its transcript. With `--json`, the result goes to stdout and progress events go to stderr. If you kept the call ID from the `created` progress event, you can save the result of a completed call later:
+
+```bash
+uv run ai-phone listen --call <id> --json > call.json
+``
+
+Replace `<id>` with the retained call ID. This retrieves a call that has already ended; listening to an active phone-agent call returns an error. Call records are kept only in memory, so after a daemon restart the ID can no longer retrieve them. `uv run ai-phone status --last-call` summarizes the turn log; it does not export the complete call result.
 
 **Relay mode**: your agent holds the conversation itself, one turn at a time:
 
