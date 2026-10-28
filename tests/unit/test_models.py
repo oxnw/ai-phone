@@ -2,10 +2,12 @@ import contextlib
 import inspect
 import logging
 import os
+import socket
 import subprocess
 import threading
 import time
 import types
+from pathlib import Path
 
 import huggingface_hub
 import pytest
@@ -109,6 +111,76 @@ def snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(models, "_hub_root", lambda: hub)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo, **k: str(snap))
     return snap
+
+
+@pytest.fixture
+def offline_hub_cache(tmp_path, monkeypatch):
+    """An isolated Hub cache and a socket guard for real offline cache discovery tests."""
+    from huggingface_hub import constants
+
+    home = tmp_path / "hf-home"
+    hub = home / "hub"
+    monkeypatch.setenv("HF_HOME", str(home))
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(hub))
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("offline Hub cache test attempted network access")
+
+    real_socket = socket.socket
+
+    class OfflineSocket(real_socket):
+        def connect(self, *args, **kwargs):
+            no_network(*args, **kwargs)
+
+        def connect_ex(self, *args, **kwargs):
+            no_network(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    monkeypatch.setattr(socket, "socket", OfflineSocket)
+    return types.SimpleNamespace(hub=hub, repo="example/offline-fixture", revision="offline-revision")
+
+
+def hub_snapshot(cache):
+    """Write a tiny cache in the layout Hub resolves for ``repo@main``."""
+    repo_dir = cache.hub / "models--example--offline-fixture"
+    blobs = repo_dir / "blobs"
+    snapshot_dir = repo_dir / "snapshots" / cache.revision
+    (repo_dir / "refs").mkdir(parents=True)
+    blobs.mkdir()
+    snapshot_dir.mkdir(parents=True)
+    (repo_dir / "refs" / "main").write_text(cache.revision)
+    (blobs / "config-blob").write_bytes(b"{}")
+    (blobs / "weight-blob").write_bytes(b"not-real-weights")
+    (snapshot_dir / "config.json").symlink_to(Path("../../blobs/config-blob"))
+    (snapshot_dir / "model.safetensors").symlink_to(Path("../../blobs/weight-blob"))
+    return types.SimpleNamespace(repo_dir=repo_dir, blobs=blobs, snapshot_dir=snapshot_dir)
+
+
+def test_local_path_discovers_a_complete_hub_snapshot_offline(offline_hub_cache):
+    snap = hub_snapshot(offline_hub_cache)
+    assert models._hub_root() == offline_hub_cache.hub
+    assert models.local_path(offline_hub_cache.repo) == snap.snapshot_dir
+
+
+def test_local_path_reports_a_missing_hub_repository_offline(offline_hub_cache):
+    assert models._hub_root() == offline_hub_cache.hub
+    assert models.local_path(offline_hub_cache.repo) is None
+
+
+def test_local_path_reports_a_snapshot_without_a_revision_reference_offline(offline_hub_cache):
+    snap = hub_snapshot(offline_hub_cache)
+    (snap.repo_dir / "refs" / "main").unlink()
+    assert models.local_path(offline_hub_cache.repo) is None
+
+
+def test_local_path_rejects_a_snapshot_with_a_missing_weight_blob_offline(offline_hub_cache):
+    snap = hub_snapshot(offline_hub_cache)
+    (snap.blobs / "weight-blob").unlink()
+    assert models.local_path(offline_hub_cache.repo) is None
 
 
 def test_local_path_says_at_debug_why_the_cache_would_not_answer(tmp_path, monkeypatch, caplog):

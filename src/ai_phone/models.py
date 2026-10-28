@@ -156,7 +156,7 @@ def _weights_complete(path: Path) -> bool:
         if found:
             present.setdefault(int(found.group(1)), set()).add(f.name)
     if not present:
-        return True  # some other naming: that weights are there at all is as much as can be checked
+        return any(f.is_file() for f in path.glob("*.safetensors"))  # some other naming: check its target exists
     total = max(present)
     return len(present[total]) == total
 
