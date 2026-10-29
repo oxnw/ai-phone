@@ -89,6 +89,14 @@ takes a message).
 
 ## Brains and privacy
 
+### Downloaded models and setup recommendations
+
+Setup's **Models** check lists complete snapshots ai-phone recognizes in the configured Hugging Face cache: its speech models, catalog brains, and the model named in the current local configuration. It does not scan every model installed on the computer or inspect Ollama's library. A model appearing as downloaded only reports cache availability; it does not select that model or change the recommendation.
+
+For a new setup, the recommendation uses detected RAM: Qwen3.5 2B for 8–15 GB, Qwen3.5 4B for 16–31 GB, and Qwen3.5 9B for 32 GB or more. Below 8 GB or when RAM cannot be detected, setup has no recommendation. You choose or confirm the brain separately. Existing catalog selections are retained when changing settings, and setup offers to download any required models that are missing. A catalog model above the machine's detected RAM can still be selected after a warning; a custom model's memory requirement is unknown to ai-phone.
+
+For example, on a 24 GB computer with only the 9B model cached, setup lists 9B as downloaded but recommends 4B. If 4B is selected, setup offers to download it. The runtime setting `models.tier: auto` follows its own rule: it selects 9B at 32 GB or more and 4B otherwise. The 8 GB setup recommendation for 2B does not change that runtime rule.
+
 The agent's words can come from a model on this Mac, from a plan you already pay for, or from any
 OpenAI-compatible server. Speech-to-text and the voice always run here, whichever you pick. `ai-phone setup`
 asks, and the daemon says at start where the words of a call go.
