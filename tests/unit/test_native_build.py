@@ -23,6 +23,7 @@ def build(tmp_path):
     kegs = tmp_path / "kegs"
     for formula in ("pjproject", "openssl@3", "openssl@4", "opus"):
         (kegs / formula / "lib" / "pkgconfig").mkdir(parents=True)
+        (kegs / formula / "include").mkdir()
     # Data-only dependencies do not need a library search path.
     (kegs / "ca-certificates").mkdir()
     log = tmp_path / "tools.jsonl"
@@ -84,6 +85,10 @@ def test_uses_the_installed_pjproject_openssl_when_both_majors_exist(build, majo
     selected = f"-L{kegs}/openssl@{major}/lib"
     other = f"-L{kegs}/openssl@{7 - major}/lib"
     assert selected in compiler["args"] and other not in compiler["args"]
+    assert f"-I{kegs}/openssl@{major}/include" in compiler["args"]
+    assert f"-I{kegs}/openssl@{7 - major}/include" not in compiler["args"]
+    assert "tls_verify.cpp" in compiler["args"]
+    assert "-I." in compiler["args"]
     assert compiler["args"].index(selected) < compiler["args"].index("-lssl")
     assert f"-L{kegs}/opus/lib" in compiler["args"]
     assert f"-L{kegs}/ca-certificates/lib" not in compiler["args"]

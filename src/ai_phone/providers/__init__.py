@@ -11,6 +11,7 @@ PROVIDERS = {
     "fake": "ai_phone.providers.fake:FakeProvider",
     "telnyx": "ai_phone.providers.telnyx:TelnyxProvider",
     "twilio": "ai_phone.providers.twilio:TwilioProvider",
+    "signalwire": "ai_phone.providers.signalwire:SignalWireProvider",
 }
 
 

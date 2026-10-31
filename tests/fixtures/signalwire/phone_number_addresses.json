@@ -1,0 +1,24 @@
+[
+  {
+    "id": "88888888-8888-4888-8888-888888888888",
+    "type": "phone",
+    "handler_type": "calling",
+    "resource_id": null,
+    "name": "Synthetic test number",
+    "phone_number": "+15555550100",
+    "phone_number_id": "55555555-5555-4555-8555-555555555555",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  {
+    "id": "99999999-9999-4999-8999-999999999999",
+    "type": "phone",
+    "handler_type": "messaging",
+    "resource_id": null,
+    "name": "Synthetic test number",
+    "phone_number": "+15555550100",
+    "phone_number_id": "55555555-5555-4555-8555-555555555555",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z"
+  }
+]

@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 from ai_phone import paths
-from ai_phone.config import E164_RE, LINE_ID_RE, ConfigError, host_of, line_password_env, load_config
+from ai_phone.carriers import CARRIERS, managed_caller_id
+from ai_phone.lines.caller_id import apply_caller_id, caller_id_journal, caller_id_line
+from ai_phone.config import E164_RE, LINE_ID_RE, SIP_URI_RE, ConfigError, host_of, line_password_env, load_config
 from ai_phone.lines.config_writer import add_line, read_raw, remove_line, update_line, write_raw
 from ai_phone.lines.credentials import generate_sip_password, generate_sip_user
 from ai_phone.lines.forward import WHEN, divert_codes
@@ -37,12 +39,16 @@ def _env(name: str | None, what: str) -> str | None:
     return v
 
 
-PROVIDER_CHOICES = ("telnyx", "twilio", "fake")  # mirrors ai_phone.providers.PROVIDERS without importing it at CLI start
+PROVIDER_CHOICES = tuple(CARRIERS)  # mirrors ai_phone.providers.PROVIDERS without importing it at CLI start
 
 
 def _provider(a):
     from ai_phone.providers import load_provider  # here, not at import: `ai-phone run` never loads the providers package
     kw = {}
+    if a.provider == "signalwire":
+        kw["space"] = getattr(a, "space", None) or _env("SIGNALWIRE_SPACE", "--space")
+    elif getattr(a, "space", None):
+        _fail("--space only applies to SignalWire")
     if a.provider == "fake":  # test hooks for the in-memory carrier
         kw["pending_polls"] = int(os.environ.get("AI_PHONE_FAKE_PENDING", "0"))
         kw["crash_after"] = os.environ.get("AI_PHONE_FAKE_CRASH_AFTER") or None
@@ -101,7 +107,7 @@ def provision_flow(provider, journal: Journal, config_path: Path, line_id: str, 
         say(f"error: {refusal}")
         return EXIT_ERROR
     # first thing in the journal, so resume always knows the number and whether it was bought or brought
-    journal.start("target", phone_number=number.e164, brought=existing)
+    journal.start("target", phone_number=number.e164, brought=existing, source_id=number.source_id)
     journal.finish("target")
     env_name = line_password_env(line_id)
     pw_step, planned = journal.start("credentials", user=generate_sip_user(line_id), password_env=env_name)
@@ -163,6 +169,10 @@ def _commit(journal: Journal, config_path: Path, line_id: str, result, env_name:
     raw = read_raw(config_path)
     previous = (raw.get("lines") or {}).get(line_id)
     if previous is not None:
+        # Resuming setup must not silently change an existing line's trust policy.
+        line.pop("tls_hostname_policy", None)
+        if "tls_hostname_policy" in previous:
+            line["tls_hostname_policy"] = previous["tls_hostname_policy"]
         update_line(config_path, line_id, **line)
     else:
         add_line(config_path, line_id, line)
@@ -194,15 +204,26 @@ def _commit(journal: Journal, config_path: Path, line_id: str, result, env_name:
 
 def cmd_add(a) -> int:
     config_path = _config_path(a)
+    if getattr(a, "preset", None):
+        if a.provider != "trunk":
+            _fail("--preset only applies to lines add trunk")
+        if a.from_user not in (None, "account"):
+            _fail("the SignalWire preset uses --from-user account")
+        a.from_user = "account"
+    if a.from_user is not None and a.provider != "trunk":
+        _fail("--from-user only applies to a trunk added by hand: lines add trunk")
     if a.provider in ("trunk", "sip"):
         if a.existing:
-            _fail("--existing works with a carrier: telnyx or twilio")
+            _fail("--existing works with a carrier: telnyx, twilio or signalwire")
         return _add_manual(a, config_path)
     if a.existing:
         if a.number or a.area:
             _fail("--existing cannot be combined with --number or --area")
         if not E164_RE.fullmatch(a.existing):
             _fail("--existing must be E.164, like +15550100000")
+    if not a.existing and not CARRIERS[a.provider].purchase:
+        _fail("SignalWire number purchasing is not available here. Buy a number in your SignalWire Space, "
+              "then connect it with --existing +15555550100.")
     provider = _provider(a)
     raw = read_raw(config_path)
     line_id = a.id or next_line_id(raw, a.provider)
@@ -232,19 +253,41 @@ def cmd_add(a) -> int:
 
 def manual_line(kind: str, *, number: str | None = None, registrar: str | None = None, user: str | None = None,
                 password_env: str | None = None, transport: str = "udp", caller_id: str | None = None, dial_domain: str | None = None,
-                outbound_proxy: str | None = None, trusted_cidrs=(), host: str | None = None, trusted=()) -> dict:
+                outbound_proxy: str | None = None, trusted_cidrs=(), host: str | None = None, trusted=(),
+                from_user: str = "number", srtp: str = "off", tls_hostname_policy: str = "strict") -> dict:
     """The config entry for a line typed in by hand: a SIP trunk (`trunk`) or a SIP address (`sip`).
     Raises ValueError for what is missing; `write_line` checks everything else by loading the config."""
+    if tls_hostname_policy not in ("strict", "verified_wildcard"):
+        raise ValueError("tls_hostname_policy must be strict or verified_wildcard")
+    if tls_hostname_policy != "strict":
+        if kind != "trunk" or transport != "tls":
+            raise ValueError("verified_wildcard requires a TLS trunk line")
+        # The TLS preset accepts the usual bare registrar input, but saves an
+        # explicit TLS next hop. An explicitly conflicting transport still fails validation.
+        if registrar and SIP_URI_RE.fullmatch(registrar) and ";transport=" not in registrar:
+            registrar += ";transport=tls"
+        if outbound_proxy and SIP_URI_RE.fullmatch(outbound_proxy) and ";transport=" not in outbound_proxy:
+            outbound_proxy += ";transport=tls"
+    if from_user not in ("number", "account"):
+        raise ValueError("from_user must be number or account")
+    if from_user == "account" and kind != "trunk":
+        raise ValueError("from_user account only applies to trunk lines")
     if kind == "trunk":
-        if not E164_RE.fullmatch(number or ""):
+        if (number is not None or from_user == "number") and not E164_RE.fullmatch(number or ""):
             raise ValueError("the number must be E.164, like +442079460000")
         if not registrar or not user or not password_env:
             raise ValueError("a trunk line needs a registrar, a user and a password")
         # host_of needs a well-formed URI; a malformed registrar is left for the config check to reject
-        line = {"kind": "trunk", "number": number, "caller_id": caller_id or number, "registrar": registrar,
+        line = {"kind": "trunk", "number": number, "caller_id": caller_id or (number if from_user == "number" else None), "registrar": registrar,
                 "dial_domain": dial_domain or (host_of(registrar) if ":" in registrar else registrar), "user": user,
                 "password_env": password_env, "transport": transport, "accept_invites_from": "registered_trunk",
                 "trusted_cidrs": list(trusted_cidrs or [])}
+        if tls_hostname_policy != "strict":
+            line["tls_hostname_policy"] = tls_hostname_policy
+        if srtp != "off":
+            line["srtp"] = srtp
+        if from_user == "account":
+            line["from_user"] = from_user
         if outbound_proxy:
             line["outbound_proxy"] = outbound_proxy
         return line
@@ -278,7 +321,7 @@ def _add_manual(a, config_path: Path) -> int:
     if a.id in (raw.get("lines") or {}):
         _fail(f"line {a.id!r} already exists; pick another --id")
     if a.provider == "trunk":
-        if not E164_RE.fullmatch(a.number or ""):
+        if (a.number is not None or a.from_user != "account") and not E164_RE.fullmatch(a.number or ""):
             _fail("--number must be E.164, like +442079460000")
         if not a.registrar or not a.user or not a.password_env:
             _fail("--registrar, --user and --password-env are required for a trunk line")
@@ -286,9 +329,11 @@ def _add_manual(a, config_path: Path) -> int:
         _fail("--user and --host are required for a sip line")
     try:
         write_line(config_path, a.id, manual_line(
-            a.provider, number=a.number, registrar=a.registrar, user=a.user, password_env=a.password_env, transport=a.transport,
-            caller_id=a.caller_id, dial_domain=a.dial_domain, outbound_proxy=a.outbound_proxy,
-            trusted_cidrs=a.trusted_cidr or (), host=a.host, trusted=a.trusted or ()))
+            a.provider, number=a.number, registrar=a.registrar, user=a.user, password_env=a.password_env, transport=a.transport or ("tls" if a.preset else "udp"),
+            caller_id=a.caller_id, dial_domain=a.dial_domain, outbound_proxy=a.outbound_proxy or (a.registrar if a.preset else None),
+            trusted_cidrs=a.trusted_cidr or (), host=a.host, trusted=a.trusted or (), from_user=a.from_user or "number",
+            srtp=a.srtp or ("required" if a.preset and a.transport in (None, "tls") else "off"),
+            tls_hostname_policy="verified_wildcard" if a.preset == "signalwire" and a.transport in (None, "tls") else "strict"))
     except ValueError as e:  # a ConfigError is a ValueError too
         _fail(str(e))
     _say(f"Line {a.id} added. Restart ai-phone (or start it) to bring it up.")
@@ -324,6 +369,7 @@ class JournalSetup(NamedTuple):
     brought: bool        # the number was already on the account (connected, not bought)
     state: str
     resumable: bool      # it has the `target` step provisioning needs to pick it up
+    provider: str | None = None
 
 
 def journal_setups(d: Path | None = None) -> dict[str, JournalSetup]:
@@ -342,7 +388,8 @@ def _journal_setup(path: Path) -> JournalSetup:
         steps = journal.doc["steps"]
         number = (_journal_number(journal) or "?") if steps else None
         return JournalSetup(number, bool(_planned(journal, "target", "brought")), str(journal.doc.get("state")),
-                            any(s["name"] == "target" for s in steps))
+                            any(s["name"] == "target" for s in steps),
+                            journal.doc.get("provider") if isinstance(journal.doc.get("provider"), str) else None)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return JournalSetup("?", False, "?", False)
 
@@ -369,6 +416,13 @@ def cmd_resume(a) -> int:
     a.provider = pname
     provider = _provider(a)
     journal = Journal.open(paths.lines_dir(), a.line_id, pname)
+    if managed_caller_id(ln):
+        provider.validate_context(journal)
+        pending = provider.pending_caller_id(journal)
+        if pending:
+            apply_caller_id(_config_path(a), a.line_id, pending, provider=provider, resume=True)
+            _say(f"Line {a.line_id} calls out as {pending}. Restart ai-phone to update its local settings.")
+            return EXIT_OK
     e164 = _journal_number(journal)
     user = _planned(journal, "credentials", "user")
     env_name = ln.get("password_env") or _planned(journal, "credentials", "password_env") or line_password_env(a.line_id)
@@ -380,7 +434,8 @@ def cmd_resume(a) -> int:
     from ai_phone.providers.base import Number, ProviderError
     run = provider.attach if _planned(journal, "target", "brought") else provider.provision
     try:
-        result = run(journal, Number(e164, None, None, False, e164), a.line_id, user, password)
+        source_id = _planned(journal, "target", "source_id") or e164
+        result = run(journal, Number(e164, None, None, False, source_id), a.line_id, user, password)
     except ProviderError as e:
         _say(f"error: {e}")
         return EXIT_ERROR
@@ -457,7 +512,7 @@ def cmd_remove(a) -> int:
                  f"its carrier resources.")
             return EXIT_ERROR
         if not a.key_env:
-            _say(f"line {a.line_id} was provisioned on {pname}. Pass --key-env (and --secret-env for twilio) to release its carrier resources, "
+            _say(f"line {a.line_id} was provisioned on {pname}. Pass --key-env and the carrier context (--secret-env for Twilio/SignalWire; --space for SignalWire) to release its carrier resources, "
                  f"or --local-only to remove it from this machine and keep them.")
             return EXIT_ERROR
         a.provider = pname
@@ -524,7 +579,8 @@ def cmd_list(a) -> int:
         _say("no lines configured; try: ai-phone lines add telnyx --key-env TELNYX_API_KEY")
         return EXIT_OK
     for lid, ln in cfg.lines.items():
-        where = ln.number or ln.aor
+        registrar = (ln.registrar or "").removeprefix("sip:").split(";", 1)[0]
+        where = ln.number or ln.aor or f"sip:{ln.user}@{registrar}"
         prov = f" ({ln.provider.name}: {ln.provider.state})" if ln.provider else ""
         _say(f"{lid:12s} {ln.kind:5s} {where}{prov}")
     if unfinished:  # a stopped purchase leaves a journal and no config line; this is where the stop message sends people
@@ -557,12 +613,17 @@ def cmd_forward(a) -> int:
 def cmd_verify(a) -> int:
     config_path = _config_path(a)
     pname, ln = _journal_for(a.line_id, a)
+    if ln.get("from_user", "number") == "account" and not managed_caller_id(ln):
+        _fail(f"line {a.line_id} uses its SIP account in From; configure the caller ID with your provider")
     if not pname:
         _fail(f"line {a.line_id} was not provisioned by a carrier module; verify the number in your carrier's portal")
     if not E164_RE.fullmatch(a.number):
         _fail("number must be E.164")
     a.provider = pname
     provider = _provider(a)
+    if managed_caller_id(ln):
+        ln = caller_id_line(config_path, a.line_id)
+        provider.validate_context(caller_id_journal(a.line_id, ln))
     step = provider.start_caller_id_verification(a.number)
     _say(step.instructions)
     ok = False
@@ -582,11 +643,27 @@ def cmd_verify(a) -> int:
     if not ok:
         _say("Verification did not complete.")
         return EXIT_ERROR
+    if managed_caller_id(ln):
+        apply_caller_id(config_path, a.line_id, a.number, provider=provider, verified=True)
+        _say(f"Line {a.line_id} now calls out as {a.number}. What the recipient sees is up to the carriers.")
+        return EXIT_OK
     verified = [v for v in (ln.get("verified_caller_ids") or []) if v.get("number") != a.number]
     verified.append({"number": a.number, "provider": pname, "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     update_line(config_path, a.line_id, verified_caller_ids=verified)
     _say(f"{a.number} can now be used as caller_id on line {a.line_id} (set `caller_id` in the config to use it). "
          "What the callee's handset shows is up to the carriers.")
+    return EXIT_OK
+
+
+def cmd_set_caller_id(a) -> int:
+    config_path = _config_path(a)
+    line = caller_id_line(config_path, a.line_id)
+    provider = None
+    if managed_caller_id(line):
+        a.provider = line["provider"]["name"]
+        provider = _provider(a)
+    apply_caller_id(config_path, a.line_id, a.number, provider=provider)
+    _say(f"Line {a.line_id} calls out as {a.number}. Restart ai-phone to apply its local settings.")
     return EXIT_OK
 
 
@@ -598,7 +675,7 @@ def _guarded(fn):
         try:
             with line_lock(paths.lines_dir()):
                 return fn(a)
-        except (ProviderError, SecretsError, ValueError) as e:
+        except (ProviderError, SecretsError, ValueError, OSError, RuntimeError) as e:
             _say(f"error: {e}")
             return EXIT_ERROR
     return run
@@ -611,24 +688,31 @@ def register(sub) -> None:
     p.add_argument("--config", default=None)
     s = p.add_subparsers(dest="lines_cmd", required=True)
 
-    add = s.add_parser("add", help="add a line: telnyx | twilio | trunk | sip")
+    add = s.add_parser("add", help="add a line: telnyx | twilio | signalwire | trunk | sip")
     add.add_argument("provider", choices=sorted(set(PROVIDER_CHOICES) | {"trunk", "sip"}))
     add.add_argument("--id")
     add.add_argument("--yes", action="store_true")
-    add.add_argument("--key-env"); add.add_argument("--secret-env")
+    add.add_argument("--key-env"); add.add_argument("--secret-env"); add.add_argument("--space", help="SignalWire Space host, such as example.signalwire.com")
     add.add_argument("--country", default="GB"); add.add_argument("--area"); add.add_argument("--number")
     add.add_argument("--existing", metavar="E164", help="connect a number already on your carrier account instead of buying one")
     add.add_argument("--registrar"); add.add_argument("--outbound-proxy"); add.add_argument("--dial-domain")
     add.add_argument("--user"); add.add_argument("--password-env"); add.add_argument("--caller-id")
-    add.add_argument("--transport", choices=["udp", "tcp", "tls"], default="udp")
+    add.add_argument("--from-user", choices=["number", "account"],
+                     help="manual trunks: use the phone number (default) or SIP account username in From")
+    add.add_argument("--transport", choices=["udp", "tcp", "tls"])
+    add.add_argument("--srtp", choices=["off", "optional", "required"], help="manual trunk media encryption; optional/required need TLS")
+    add.add_argument("--preset", choices=["signalwire"], help="manual trunk: SignalWire account identity; TLS/SRTP by default")
     add.add_argument("--trusted-cidr", action="append"); add.add_argument("--host"); add.add_argument("--trusted", action="append")
     add.set_defaults(func=_guarded(cmd_add))
 
-    r = s.add_parser("resume"); r.add_argument("line_id"); r.add_argument("--key-env", required=True); r.add_argument("--secret-env"); r.set_defaults(func=_guarded(cmd_resume))
-    rm = s.add_parser("remove"); rm.add_argument("line_id"); rm.add_argument("--key-env"); rm.add_argument("--secret-env")
+    r = s.add_parser("resume"); r.add_argument("line_id"); r.add_argument("--key-env", required=True); r.add_argument("--secret-env"); r.add_argument("--space"); r.set_defaults(func=_guarded(cmd_resume))
+    rm = s.add_parser("remove"); rm.add_argument("line_id"); rm.add_argument("--key-env"); rm.add_argument("--secret-env"); rm.add_argument("--space")
     rm.add_argument("--local-only", action="store_true"); rm.add_argument("--yes", action="store_true"); rm.set_defaults(func=_guarded(cmd_remove))
     s.add_parser("list").set_defaults(func=_guarded(cmd_list))
     f = s.add_parser("forward"); f.add_argument("line_id"); f.add_argument("--when", choices=list(WHEN), default="no-answer")
     f.add_argument("--from", dest="from_number", required=True); f.set_defaults(func=_guarded(cmd_forward))
     v = s.add_parser("verify-caller-id"); v.add_argument("line_id"); v.add_argument("number"); v.add_argument("--key-env", required=True)
-    v.add_argument("--secret-env"); v.set_defaults(func=_guarded(cmd_verify))
+    v.add_argument("--secret-env"); v.add_argument("--space"); v.set_defaults(func=_guarded(cmd_verify))
+    cid = s.add_parser("set-caller-id", help="use the line number or a caller ID already verified for this line")
+    cid.add_argument("line_id"); cid.add_argument("number"); cid.add_argument("--key-env"); cid.add_argument("--secret-env"); cid.add_argument("--space")
+    cid.set_defaults(func=_guarded(cmd_set_caller_id))

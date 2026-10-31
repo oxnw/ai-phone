@@ -21,14 +21,18 @@ done
 step "Setting up the Python environment"
 uv sync
 
+sip_binding_ready() {
+  uv run python -c 'from ai_phone.vendor import pjsua2; raise SystemExit(0 if pjsua2.ai_phone_tls_verifier_version() == 1 else 1)' >/dev/null 2>&1
+}
+
 step "Building the SIP library"
-if uv run python -c "import ai_phone.vendor.pjsua2" >/dev/null 2>&1; then
-  echo "already built"
+if sip_binding_ready; then
+  echo "already built (TLS verifier version 1)"
 else
-  PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" ./native/pjsua2/build.sh
+  PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" ./native/pjsua2/build.sh || fail "the SIP library build failed; see native/pjsua2/README.md"
   mkdir -p src/ai_phone/vendor
   cp native/pjsua2/build/pjsua2.py native/pjsua2/build/_pjsua2*.so src/ai_phone/vendor/
-  uv run python -c "import ai_phone.vendor.pjsua2" || fail "the SIP library was built but does not import; see native/pjsua2/README.md"
+  sip_binding_ready || fail "the SIP library was built but cannot load TLS verifier version 1; see native/pjsua2/README.md"
 fi
 
 step "Ready"

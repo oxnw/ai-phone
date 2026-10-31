@@ -10,6 +10,7 @@
 //
 %{
 #include "pjsua2.hpp"
+#include "tls_verify.hpp"
 using namespace std;
 using namespace pj;
 %}
@@ -329,3 +330,6 @@ def ai_phone_get_keepalive():
 %}
 
 %include "pjsua2/endpoint.hpp"
+
+/* ai-phone: isolated TLS verification plus deactivate-before-destroy/reset lifecycle. */
+%include "tls_verify.hpp"

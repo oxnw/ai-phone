@@ -28,7 +28,7 @@ and choosing **Change call directions**, then restart a running daemon to apply 
 
 To change the number people see when your agent calls, run setup again and choose **Change caller ID**.
 Pick a line, then its purchased number or one of your verified numbers. You can also verify another number you
-own through Twilio or Telnyx. Switching back to the line's number keeps your verified numbers for later;
+own through Twilio, Telnyx or an API-managed SignalWire line. Switching back to the line's number keeps your verified numbers for later;
 restart a running daemon to apply the selection.
 
 The Voice step offers Phonon 31M English (streaming, one bundled voice at normal speed) and Kokoro
@@ -86,6 +86,23 @@ During a call the daemon opens no network connection except SIP/RTP to the peer 
 What an incoming call hears is set by one `inbound:` section of the config: a greeting that plays on every incoming
 call, and the instructions ai-phone's own model follows when no AI is waiting in `ai-phone listen` (the example config
 takes a message).
+
+## SignalWire and trunk identity
+
+SignalWire is available in setup and through `ai-phone lines add signalwire --existing …`. It uses a Space host,
+Project ID and API token to connect a number already on the account. New numbers must currently be bought in
+SignalWire's portal. See [SignalWire setup](signalwire.md) for credentials, commands, caller ID and verification status.
+
+Manual trunks can set `from_user: account` (CLI: `--from-user account`) when the provider requires the authenticated
+SIP username in outbound From. The default `number` keeps the existing Telnyx/Twilio behavior. Account mode may be
+used without a local phone number; the provider controls the displayed caller ID. Registration and digest
+credentials are unchanged, and inbound source checks remain in force.
+
+TLS lines default to `tls_hostname_policy: strict`. New SignalWire TLS setups explicitly select
+`verified_wildcard`, which verifies the certificate chain, dates and DNS SAN during the handshake on a dedicated
+transport. It requires a fixed TLS outbound proxy and `register_via_proxy: true`. Existing lines retain their
+policy on resume. See [TLS certificates](signalwire.md#tls-certificates) for the binding rebuild, manual upgrade
+and incoming-connection limitation.
 
 ## Brains and privacy
 

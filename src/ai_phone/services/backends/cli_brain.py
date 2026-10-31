@@ -75,8 +75,8 @@ UNNAMED = "unrecognised"   # what a value that is not one of the above is called
 # base URL or token file that would send the call somewhere else. `ANTHROPIC_API_KEY` is the one that matters most --
 # Claude Code prefers it over the keychain login, so with it set the whole premise of this brain is quietly false and
 # every call is charged per token. None of these crosses into either CLI.
-PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "AWS_", "AZURE_", "GOOGLE_", "GCLOUD_", "VERTEX_", "BEDROCK_")
-PROVIDER_ENV_SUFFIXES = ("_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_BASE_URL", "_TOKEN_FILE", "_API_BASE")
+PROVIDER_ENV_PREFIXES = ("ANTHROPIC_", "OPENAI_", "AWS_", "AZURE_", "GOOGLE_", "GCLOUD_", "VERTEX_", "BEDROCK_", "SIGNALWIRE_")
+PROVIDER_ENV_SUFFIXES = ("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_BASE_URL", "_TOKEN_FILE", "_API_BASE")
 
 # Codex: the feature flags that carry its tools (`codex features list`; `--disable <name>` is `-c features.<name>=false`).
 # There is no single switch and no `tools` setting for them -- the app-server's own `tools` table holds only web search

@@ -13,7 +13,7 @@ from ai_phone.telephony.rings import FrameRing
 
 
 SECRET_ENV_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)", re.IGNORECASE)
-SECRET_ENV_PREFIXES = ("AI_PHONE_LINE_", "TELNYX_", "TWILIO_")
+SECRET_ENV_PREFIXES = ("AI_PHONE_LINE_", "TELNYX_", "TWILIO_", "SIGNALWIRE_")
 
 
 def is_secret_env(name: str) -> bool:

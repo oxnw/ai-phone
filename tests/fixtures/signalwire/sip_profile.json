@@ -1,0 +1,14 @@
+{
+  "domain": "actual-profile.sip.signalwire.com",
+  "domain_identifier": "actual-profile",
+  "default_codecs": [
+    "PCMU",
+    "PCMA"
+  ],
+  "default_ciphers": [
+    "AES_CM_128_HMAC_SHA1_80"
+  ],
+  "default_encryption": "required",
+  "default_outbound_policy": "block-pstn",
+  "default_send_as": "random"
+}
