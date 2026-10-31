@@ -5,7 +5,7 @@ Speech models and the current macOS Apple Silicon requirements are unchanged.
 
 ## Connect an existing number
 
-Run `uv run ai-phone setup`, choose a phone number, then **SignalWire → Connect with API**. You need:
+Run `ai-phone setup`, choose a phone number, then **SignalWire → Connect with API**. You need:
 
 | Setting | Where it comes from |
 |---|---|
@@ -20,7 +20,7 @@ The API Space host and SIP domain are separate; setup retrieves the SIP domain f
 From the CLI, with credentials already saved in your environment or `secrets.env`:
 
 ```bash
-uv run ai-phone lines add signalwire --id signalwire \
+ai-phone lines add signalwire --id signalwire \
   --space example.signalwire.com \
   --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN \
   --existing +15555550100
@@ -44,7 +44,7 @@ seen by the recipient. Registration and digest authentication still use the same
 In setup, choose **SignalWire → Use SIP credentials**. The equivalent CLI command is:
 
 ```bash
-uv run ai-phone lines add trunk --preset signalwire --id signalwire \
+ai-phone lines add trunk --preset signalwire --id signalwire \
   --registrar sip:example.sip.signalwire.com:5061 --user aidemo \
   --password-env AI_PHONE_LINE_SIGNALWIRE_PASSWORD
 ```
@@ -105,7 +105,7 @@ including resumed setups, are not automatically changed. To update an existing T
 2. Edit that line in `~/.ai-phone/config.yaml` to include the proxy, proxy-registration and policy fields in the
    example above. Keep its existing username, password reference, number and caller ID.
 3. After any active call ends, stop the daemon with Ctrl+C in its running terminal, then start it again with
-   `uv run ai-phone run`. Check the line with `uv run ai-phone status`.
+   `ai-phone run`. Check the line with `ai-phone status`.
 
 This local update does not require recreating the carrier endpoint or changing credentials.
 
@@ -118,10 +118,10 @@ project needs no verification call. For another number, choosing verification st
 The equivalent CLI commands are:
 
 ```bash
-uv run ai-phone lines verify-caller-id signalwire +15555550101 \
+ai-phone lines verify-caller-id signalwire +15555550101 \
   --space example.signalwire.com \
   --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN
-uv run ai-phone lines set-caller-id signalwire +15555550100 \
+ai-phone lines set-caller-id signalwire +15555550100 \
   --space example.signalwire.com \
   --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN
 ```
@@ -137,9 +137,9 @@ select the number marked **Resume**. Use the same Space and Project as before.
 The equivalent CLI commands are:
 
 ```bash
-uv run ai-phone lines resume signalwire --space example.signalwire.com \
+ai-phone lines resume signalwire --space example.signalwire.com \
   --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN
-uv run ai-phone lines remove signalwire --space example.signalwire.com \
+ai-phone lines remove signalwire --space example.signalwire.com \
   --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN
 ```
 
