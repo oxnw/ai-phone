@@ -1,4 +1,6 @@
+import copy
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -9,14 +11,55 @@ from ai_phone.providers.base import Number, ProviderError
 from ai_phone.providers.telnyx import SIGNALLING_CIDRS, TELNYX_API, TelnyxProvider
 
 
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "telnyx"
+_METADATA = ("id", "record_type", "created_at", "updated_at")
+
+
+def contract_fixture(name):
+    return json.loads((FIXTURES / name).read_text())["data"]
+
+
+def contract_fields(record, template):
+    """Project explicit documented fields instead of echoing arbitrary request keys."""
+    result = {}
+    for key, shape in template.items():
+        if key in _METADATA or key not in record:
+            continue
+        value = record[key]
+        result[key] = (contract_fields(value, shape) if isinstance(shape, dict) and isinstance(value, dict)
+                       else copy.deepcopy(value))
+    return result
+
+
+def contract_response(record, template, resource_id):
+    return {**{key: template[key] for key in _METADATA if key in template},
+            **contract_fields(record, template), "id": resource_id}
+
+
 class Carrier:
     """Just enough of api.telnyx.com/v2 to provision, poll, release and verify."""
 
-    def __init__(self, order_status="success", crash_on=None):
+    def __init__(self, order_status="success", crash_on=None, mask_passwords=False):
         self.profiles, self.connections, self.orders, self.numbers, self.verified = {}, {}, {}, {}, {}
         self.order_status, self.crash_on = order_status, crash_on
         self.calls = []
         self.patches = []  # (number id, body) of every PATCH to a number
+        self.page_size = None
+        self.mask_passwords = mask_passwords
+        self.connection_shape = contract_fixture("credential_connection_create.json")
+        self.profile_shape = contract_fixture("outbound_voice_profile.json")
+
+    def _connection_response(self, record, resource_id, *, read=False):
+        response = contract_response(record, self.connection_shape, resource_id)
+        if read and self.mask_passwords and "password" in response:
+            response["password"] = contract_fixture("credential_connection_retrieve_masked.json")["password"]
+        return response
+
+    def _list(self, req, rows):
+        size = self.page_size or int(req.url.params.get("page[size]", 100))
+        page = int(req.url.params.get("page[number]", 1))
+        return httpx.Response(200, json={"data": rows[(page - 1) * size:page * size],
+                                        "meta": {"page_number": page, "total_pages": (len(rows) + size - 1) // size}})
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         self.calls.append((req.method, req.url.path))
@@ -26,17 +69,42 @@ class Carrier:
         if m == "GET" and p == "/v2/available_phone_numbers":
             return httpx.Response(200, json={"data": [{"phone_number": "+442079460000", "cost_information": {"monthly_cost": "1.00", "currency": "GBP"}, "requirements": []}]})
         if m == "POST" and p == "/v2/outbound_voice_profiles":
-            pid = f"p{len(self.profiles) + 1}"; self.profiles[pid] = body
+            # Contract learned from Telnyx's 422 response: tags permit letters, digits, dashes and underscores.
+            # Validate requests before storing anything so a permissive echo fake cannot hide this failure.
+            tags = body.get("tags", [])
+            if not isinstance(tags, list) or any(not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tag) for tag in tags):
+                return httpx.Response(422, json={"errors": [{"detail": "Tags may only contain letters, digits, dashes and underscores."}]})
+            stored = contract_fields(body, self.profile_shape)
+            stored.setdefault("traffic_type", "conversational")
+            stored.setdefault("whitelisted_destinations", ["US", "CA"])
+            stored.setdefault("enabled", True)
+            pid = f"p{len(self.profiles) + 1}"; self.profiles[pid] = stored
             if self.crash_on == "profile":
                 return httpx.Response(500, json={"errors": [{"detail": "boom"}]})
-            return httpx.Response(201, json={"data": {"id": pid, **body}})
+            return httpx.Response(201, json={"data": contract_response(stored, self.profile_shape, pid)})
         if m == "GET" and p == "/v2/outbound_voice_profiles":
-            return httpx.Response(200, json={"data": [{"id": k, **v} for k, v in self.profiles.items()]})
+            return self._list(req, [contract_response(v, self.profile_shape, k) for k, v in self.profiles.items()])
         if m == "POST" and p == "/v2/credential_connections":
-            cid = f"c{len(self.connections) + 1}"; self.connections[cid] = body
-            return httpx.Response(201, json={"data": {"id": cid, **body}})
+            # Unsupported request fields cannot become response fields, including the subdomain
+            # setting that belongs to other connection types. Only documented defaults are added.
+            stored = contract_fields(body, self.connection_shape)
+            stored.setdefault("active", True)
+            stored.setdefault("encode_contact_header_enabled", False)
+            for direction in ("inbound", "outbound"):
+                stored.setdefault(direction, {})
+                if isinstance(stored[direction], dict):
+                    stored[direction].setdefault("channel_limit", None)
+            cid = f"c{len(self.connections) + 1}"; self.connections[cid] = stored
+            if self.crash_on == "connection":
+                return httpx.Response(500, json={"errors": [{"detail": "boom"}]})
+            return httpx.Response(201, json={"data": self._connection_response(stored, cid)})
         if m == "GET" and p == "/v2/credential_connections":
-            return httpx.Response(200, json={"data": [{"id": k, **v} for k, v in self.connections.items()]})
+            return self._list(req, [self._connection_response(v, k, read=True) for k, v in self.connections.items()])
+        if m == "GET" and p.startswith("/v2/credential_connections/"):
+            cid = p.rsplit("/", 1)[1]
+            if cid not in self.connections:
+                return httpx.Response(404, json={"errors": [{"detail": "Resource not found"}]})
+            return httpx.Response(200, json={"data": self._connection_response(self.connections[cid], cid, read=True)})
         if m == "POST" and p == "/v2/number_orders":
             oid = f"o{len(self.orders) + 1}"
             self.orders[oid] = {"status": self.order_status, "phone_numbers": body["phone_numbers"], "connection_id": body.get("connection_id"),
@@ -443,3 +511,612 @@ def test_a_bring_then_a_buy_in_one_journal_restores_the_brought_number(tmp_path:
     assert p.release(j).ok
     assert list(carrier.numbers) == ["n9"], "the bought number is released"
     assert carrier.numbers["n9"]["connection_id"] == "old-conn" and not carrier.connections and not carrier.profiles
+
+
+# ---- reconciliation must establish identity, not just a matching name ----------------------------
+
+SIP_USER = "aimain1234"
+SIP_PASSWORD = "LocalSyntheticPassword123"
+
+
+def _connection_record(**fields):
+    return {"connection_name": "ai-phone:main", "user_name": SIP_USER, "password": SIP_PASSWORD, "active": True,
+            "sip_uri_calling_preference": "disabled", "encode_contact_header_enabled": True,
+            "inbound": {"channel_limit": 1},
+            "outbound": {"outbound_voice_profile_id": "p1", "channel_limit": 1}, **fields}
+
+
+def _connection_attempt(tmp_path, carrier, *, completed=False):
+    carrier.profiles["p1"] = {"name": "ai-phone:main", "traffic_type": "conversational"}
+    j = Journal.open(tmp_path, "main", "telnyx")
+    j.start("profile", name="ai-phone:main")
+    j.finish("profile", outbound_voice_profile_id="p1")
+    j.start("connection", name="ai-phone:main", user_name=SIP_USER)
+    if completed:
+        j.finish("connection", connection_id="c1")
+    return j
+
+
+def _resume_connection(p, j):
+    return p.provision(j, Number("+15555550100", None, None, False, "n1"), "main", SIP_USER, SIP_PASSWORD)
+
+
+def test_lost_connection_response_recovers_matching_attempt_without_another_post(tmp_path):
+    carrier = _owned(Carrier(crash_on="connection"))
+    p = _provider(carrier)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    n = Number("+15550100001", None, None, False, "n9")
+    with pytest.raises(ProviderError):
+        p.attach(j, n, "main", SIP_USER, SIP_PASSWORD)
+    assert "connection_id" not in j.resources() and not carrier.patches
+    carrier.crash_on = None
+    assert p.attach(Journal.open(tmp_path, "main"), n, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+    assert len(carrier.connections) == 1
+
+
+@pytest.mark.parametrize("changes", [
+    {"user_name": "anotheruser"}, {"password": "OtherSyntheticPassword123"},
+    {"active": False}, {"active": 1}, {"sip_uri_calling_preference": "unrestricted"},
+    {"encode_contact_header_enabled": False},
+    {"inbound": {"channel_limit": 2}}, {"inbound": {}},
+    {"sip_uri_calling_preference": None},
+    {"outbound": {"outbound_voice_profile_id": "other-profile", "channel_limit": 1}},
+    {"outbound": {"outbound_voice_profile_id": "p1", "channel_limit": 2}},
+])
+def test_uncertain_connection_rejects_changed_credentials_or_settings_without_mutation(tmp_path, changes):
+    carrier = Carrier()
+    j = _connection_attempt(tmp_path, carrier)
+    carrier.connections["c1"] = _connection_record(**changes)
+    before = copy.deepcopy(carrier.connections)
+    with pytest.raises(ProviderError, match="does not match.*saved SIP credentials or settings") as error:
+        _resume_connection(_provider(carrier), j)
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert carrier.connections == before and "connection_id" not in j.resources()
+    assert SIP_PASSWORD not in str(error.value) and "OtherSyntheticPassword123" not in str(error.value)
+    assert SIP_USER not in str(error.value) and "anotheruser" not in str(error.value)
+    assert SIP_PASSWORD not in j.path.read_text()
+
+
+@pytest.mark.parametrize("same_credentials", [False, True])
+def test_fresh_setup_never_adopts_an_existing_connection_by_name(tmp_path, same_credentials):
+    carrier = Carrier()
+    carrier.connections["foreign"] = _connection_record(**({} if same_credentials else {"user_name": "anotheruser"}))
+    j = Journal.open(tmp_path, "main", "telnyx")
+    with pytest.raises(ProviderError, match="already uses this setup name"):
+        _resume_connection(_provider(carrier), j)
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert not carrier.profiles and not j.resources() and len(carrier.connections) == 1
+
+
+@pytest.mark.parametrize("page_size", [None, 1])
+def test_duplicate_connection_candidates_are_refused_even_across_pages(tmp_path, page_size):
+    carrier = Carrier()
+    carrier.page_size = page_size
+    j = _connection_attempt(tmp_path, carrier)
+    carrier.connections = {"c1": _connection_record(), "c2": _connection_record()}
+    with pytest.raises(ProviderError, match="Multiple Telnyx resources"):
+        _resume_connection(_provider(carrier), j)
+    assert "connection_id" not in j.resources() and all(method == "GET" for method, _ in carrier.calls)
+    if page_size == 1:
+        assert carrier.calls.count(("GET", "/v2/credential_connections")) == 2
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_duplicate_422_only_reconciles_the_matching_attempt(tmp_path, matching):
+    carrier = _owned(Carrier())
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/credential_connections":
+            carrier.calls.append((req.method, req.url.path))
+            body = json.loads(req.content)
+            carrier.connections["c1"] = body if matching else {**body, "password": "OtherSyntheticPassword123"}
+            return httpx.Response(422, json={"errors": [{"detail": "duplicate connection name"}]})
+        return carrier(req)
+    p = _provider(handler)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    n = Number("+15550100001", None, None, False, "n9")
+    if matching:
+        assert p.attach(j, n, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+        assert j.resources()["connection_id"] == "c1" and len(carrier.patches) == 1
+    else:
+        with pytest.raises(ProviderError, match="does not match"):
+            p.attach(j, n, "main", SIP_USER, SIP_PASSWORD)
+        assert "connection_id" not in j.resources() and not carrier.patches
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+    assert not [call for call in carrier.calls if call[0] in ("PATCH", "DELETE") and "credential_connections" in call[1]]
+
+
+@pytest.mark.parametrize("attach", [True, False])
+@pytest.mark.parametrize("changes", [{"password": "OtherSyntheticPassword123"}, {"user_name": "anotheruser"}])
+def test_completed_legacy_connection_is_rechecked_before_routing_or_reporting_ready(tmp_path, attach, changes):
+    carrier = _owned(Carrier())
+    j = _connection_attempt(tmp_path, carrier, completed=True)
+    carrier.connections["c1"] = _connection_record(**changes)
+    p = _provider(carrier)
+    with pytest.raises(ProviderError, match="does not match"):
+        if attach:
+            p.attach(j, Number("+15550100001", None, None, False, "n9"), "main", SIP_USER, SIP_PASSWORD)
+        else:
+            _resume_connection(p, j)
+    assert ("GET", "/v2/credential_connections/c1") in carrier.calls
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert not carrier.patches and not carrier.orders and j.state != "ready"
+
+
+def test_completed_connection_missing_at_carrier_is_not_recreated(tmp_path):
+    carrier = Carrier()
+    j = _connection_attempt(tmp_path, carrier, completed=True)
+    with pytest.raises(ProviderError, match="no longer exists"):
+        _resume_connection(_provider(carrier), j)
+    assert all(method == "GET" for method, _ in carrier.calls) and not carrier.connections
+
+
+def test_completed_connection_can_resume_with_unchanged_credentials(tmp_path):
+    carrier = _owned(Carrier())
+    j = _connection_attempt(tmp_path, carrier, completed=True)
+    carrier.connections["c1"] = _connection_record()
+    assert _provider(carrier).attach(j, Number("+15550100001", None, None, False, "n9"),
+                                     "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert not [call for call in carrier.calls if call[0] == "POST"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_same_name_foreign_profile_is_not_claimed_for_cleanup(tmp_path, legacy):
+    carrier = Carrier()
+    carrier.profiles["foreign"] = {"name": "ai-phone:main", "traffic_type": "conversational",
+                                   "whitelisted_destinations": ["CA", "US"], "tags": ["another-setup"]}
+    j = Journal.open(tmp_path, "main", "telnyx")
+    if legacy:
+        j.start("profile", name="ai-phone:main")
+    with pytest.raises(ProviderError, match="cannot be identified"):
+        _resume_connection(_provider(carrier), j)
+    assert "outbound_voice_profile_id" not in j.resources() and "connection_id" not in j.resources()
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert _provider(carrier).release(j).ok and "foreign" in carrier.profiles
+
+
+def test_lost_profile_response_has_a_persisted_recovery_tag_before_the_post(tmp_path):
+    carrier = Carrier(crash_on="profile")
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/outbound_voice_profiles":
+            planned = next(s["planned"] for s in Journal.open(tmp_path, "main").doc["steps"] if s["name"] == "profile")
+            assert json.loads(req.content)["tags"] == [planned["recovery_tag"]]
+        return carrier(req)
+    p = _provider(handler)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    with pytest.raises(ProviderError):
+        _resume_connection(p, j)
+    tag = carrier.profiles["p1"]["tags"][0]
+    carrier.crash_on = None
+    carrier.numbers["n9"] = {"phone_number": "+15555550100"}
+    assert p.attach(Journal.open(tmp_path, "main"), Number("+15555550100", None, None, False, "n9"),
+                    "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert carrier.profiles["p1"]["tags"] == [tag]
+    assert carrier.calls.count(("POST", "/v2/outbound_voice_profiles")) == 1
+
+
+def test_profile_recovery_rejects_changed_request_settings(tmp_path):
+    carrier = Carrier(crash_on="profile")
+    p = _provider(carrier)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    with pytest.raises(ProviderError):
+        _resume_connection(p, j)
+    carrier.profiles["p1"]["whitelisted_destinations"] = ["US"]
+    carrier.calls.clear()
+    with pytest.raises(ProviderError, match="cannot be identified"):
+        _resume_connection(p, Journal.open(tmp_path, "main"))
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert "outbound_voice_profile_id" not in j.resources()
+
+
+def test_unverifiable_search_pagination_cannot_adopt_or_create(tmp_path):
+    def handler(req):
+        assert req.method == "GET"
+        return httpx.Response(200, json={"data": [{"id": "c1", **_connection_record()}]})
+    with pytest.raises(ProviderError, match="search could not be verified"):
+        _resume_connection(_provider(handler), Journal.open(tmp_path, "main", "telnyx"))
+
+
+def test_lost_connection_transport_response_is_recovered_without_creating_again(tmp_path):
+    carrier = _owned(Carrier())
+    lost = True
+    def handler(req):
+        nonlocal lost
+        response = carrier(req)
+        if lost and req.method == "POST" and req.url.path == "/v2/credential_connections":
+            lost = False
+            raise httpx.ReadTimeout("lost response")
+        return response
+    p = _provider(handler)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    number = Number("+15550100001", None, None, False, "n9")
+    with pytest.raises(ProviderError, match="ReadTimeout"):
+        p.attach(j, number, "main", SIP_USER, SIP_PASSWORD)
+    assert p.attach(Journal.open(tmp_path, "main"), number, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+
+
+def test_duplicate_422_without_a_matching_connection_remains_an_error(tmp_path):
+    carrier = Carrier()
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/credential_connections":
+            carrier.calls.append((req.method, req.url.path))
+            return httpx.Response(422, json={"errors": [{"detail": "invalid connection"}]})
+        return carrier(req)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    with pytest.raises(ProviderError, match="no matching setup was found"):
+        _resume_connection(_provider(handler), j)
+    assert "connection_id" not in j.resources() and not carrier.orders and not carrier.patches
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+
+
+def test_credentials_read_from_carrier_are_redacted_from_later_errors(tmp_path):
+    carrier = Carrier()
+    j = _connection_attempt(tmp_path, carrier)
+    remote_password = "ForeignSyntheticPassword987"
+    carrier.connections["c1"] = _connection_record(password=remote_password)
+    def handler(req):
+        if req.url.path == "/v2/credential_connections/c1":
+            return httpx.Response(500, json={"errors": [{"detail": f"failed for {remote_password}"}]})
+        return carrier(req)
+    with pytest.raises(ProviderError) as error:
+        _resume_connection(_provider(handler), j)
+    assert remote_password not in str(error.value) and SIP_PASSWORD not in str(error.value)
+    assert "***" in str(error.value)
+
+
+def test_conflicting_journal_identity_is_refused_before_carrier_requests(tmp_path):
+    carrier = Carrier()
+    j = _connection_attempt(tmp_path, carrier)
+    j.doc["steps"][-1]["planned"]["user_name"] = "anotheruser"
+    with pytest.raises(ProviderError, match="journal disagrees"):
+        _resume_connection(_provider(carrier), j)
+    assert not carrier.calls
+
+
+@pytest.mark.parametrize("name", ["ai-phone:other", "not-an-ai-phone-name", "ai-phone:../outside"])
+def test_recorded_profile_and_connection_names_must_remain_consistent(tmp_path, name):
+    carrier = Carrier()
+    j = _connection_attempt(tmp_path, carrier, completed=True)
+    j.doc["steps"][0]["planned"]["name"] = name
+    with pytest.raises(ProviderError, match="journal disagrees"):
+        _resume_connection(_provider(carrier), j)
+    assert not carrier.calls
+
+
+def test_lost_profile_response_accepts_carrier_normalized_destination_order(tmp_path):
+    carrier = _owned(Carrier(crash_on="profile"))
+    p = _provider(carrier)
+    j = Journal.open(tmp_path, "main", "telnyx")
+    number = Number("+15550100001", None, None, False, "n9")
+    with pytest.raises(ProviderError):
+        p.attach(j, number, "main", SIP_USER, SIP_PASSWORD)
+    carrier.profiles["p1"]["whitelisted_destinations"].reverse()
+    carrier.crash_on = None
+    assert p.attach(Journal.open(tmp_path, "main"), number, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert carrier.calls.count(("POST", "/v2/outbound_voice_profiles")) == 1
+
+
+@pytest.mark.parametrize("field", ["tags", "whitelisted_destinations"])
+def test_profile_set_fields_require_identical_members_but_ignore_order(field):
+    expected = {field: ["first", "second"]}
+    assert TelnyxProvider._matches({field: ["second", "first"]}, expected)
+    for actual in (["first"], ["first", "second", "extra"], None, "first", ["first", {}]):
+        assert not TelnyxProvider._matches({field: actual}, expected)
+
+
+# Recovery tags are constrained by the carrier, not arbitrary customer-reference strings.
+
+OLD_PROFILE_TAG = "ai-phone:" + "a" * 32
+
+
+def _rejected_profile_attempt(tmp_path):
+    j = Journal.open(tmp_path, "main", "telnyx")
+    j.start("claim", phone_number="+15550100001")
+    j.finish("claim", brought_number_id="n9", number_brought=True, previous_connection_id="old-conn")
+    j.start("profile", name="ai-phone:main", recovery_tag=OLD_PROFILE_TAG)
+    return j
+
+
+def _resume_rejected_profile(provider, journal):
+    return provider.attach(journal, Number("+15550100001", None, None, False, "n9"), "main", SIP_USER, SIP_PASSWORD)
+
+
+@pytest.mark.parametrize("tag", [OLD_PROFILE_TAG, "tag with spaces", "tag/slash", "tag.ending", "", None])
+def test_profile_request_validation_rejects_invalid_tags_before_resource_creation(tag):
+    carrier = Carrier()
+    with pytest.raises(ProviderError) as error:
+        _provider(carrier)._call("POST", "/outbound_voice_profiles", json={"name": "ai-phone:main", "tags": [tag]})
+    assert error.value.status == 422 and not carrier.profiles
+
+
+def test_new_profile_tag_meets_carrier_validation_and_is_saved_before_request(tmp_path):
+    carrier = _owned(Carrier())
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/outbound_voice_profiles":
+            tag, = json.loads(req.content)["tags"]
+            assert re.fullmatch(r"ai-phone-[0-9a-f]{32}", tag)
+            assert Journal.open(tmp_path, "main")._step("profile")["planned"]["recovery_tag"] == tag
+        return carrier(req)
+    assert _resume_rejected_profile(_provider(handler), Journal.open(tmp_path, "main", "telnyx")).state == "ready"
+    assert len(carrier.profiles) == len(carrier.connections) == 1
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_rejected_old_tag_retries_only_after_empty_reads_and_persists_replacement(tmp_path, lost_response):
+    carrier = _owned(Carrier(crash_on="profile" if lost_response else None), connection_id="old-conn")
+    j = _rejected_profile_attempt(tmp_path)
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/outbound_voice_profiles":
+            assert carrier.calls == [("GET", "/v2/credential_connections"), ("GET", "/v2/outbound_voice_profiles")]
+            tag, = json.loads(req.content)["tags"]
+            assert tag == OLD_PROFILE_TAG.replace(":", "-")
+            assert Journal.open(tmp_path, "main")._step("profile")["planned"]["recovery_tag"] == tag
+        return carrier(req)
+    provider = _provider(handler)
+    if lost_response:
+        with pytest.raises(ProviderError):
+            _resume_rejected_profile(provider, j)
+        assert not carrier.patches
+        carrier.crash_on = None
+        j = Journal.open(tmp_path, "main")
+    assert _resume_rejected_profile(provider, j).state == "ready"
+    assert carrier.calls.count(("POST", "/v2/outbound_voice_profiles")) == 1
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+    assert len(carrier.profiles) == len(carrier.connections) == 1
+
+
+@pytest.mark.parametrize("resource", ["profile", "connection", "duplicate_profiles"])
+def test_old_tag_is_not_rewritten_when_carrier_resources_exist(tmp_path, resource):
+    carrier = _owned(Carrier())
+    j = _rejected_profile_attempt(tmp_path)
+    if resource == "connection":
+        carrier.connections["c1"] = _connection_record()
+    else:
+        profile = {"name": "ai-phone:main", "traffic_type": "conversational", "whitelisted_destinations": ["CA", "US"],
+                   "tags": ["foreign-tag"]}
+        carrier.profiles["foreign"] = profile
+        if resource == "duplicate_profiles":
+            carrier.profiles["other"] = dict(profile)
+            carrier.page_size = 1
+    before = j.path.read_bytes()
+    with pytest.raises(ProviderError):
+        _resume_rejected_profile(_provider(carrier), j)
+    assert j.path.read_bytes() == before
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert not carrier.patches
+
+
+def test_existing_matching_profile_keeps_old_tag_and_is_not_recreated(tmp_path):
+    carrier = _owned(Carrier())
+    j = _rejected_profile_attempt(tmp_path)
+    carrier.profiles["p1"] = {"name": "ai-phone:main", "traffic_type": "conversational",
+                              "whitelisted_destinations": ["CA", "US"], "tags": [OLD_PROFILE_TAG]}
+    assert _resume_rejected_profile(_provider(carrier), j).state == "ready"
+    assert j._step("profile")["planned"]["recovery_tag"] == OLD_PROFILE_TAG
+    assert carrier.profiles["p1"]["tags"] == [OLD_PROFILE_TAG]
+    assert ("POST", "/v2/outbound_voice_profiles") not in carrier.calls
+
+
+@pytest.mark.parametrize("state", ["connection_started", "later_step", "partial_result", "unknown_tag"])
+def test_old_tag_migration_refuses_evidence_of_later_work_or_unrecognized_metadata(tmp_path, state):
+    carrier = _owned(Carrier())
+    j = _rejected_profile_attempt(tmp_path)
+    if state == "connection_started":
+        j.start("connection", name="ai-phone:main", user_name=SIP_USER)
+    elif state == "later_step":
+        j.start("route", brought_number_id="n9", connection_id="c1")
+    elif state == "partial_result":
+        j._step("profile")["result"] = {"outbound_voice_profile_id": "p1"}
+        j._save()
+    else:
+        j._step("profile")["planned"]["recovery_tag"] = "unknown:tag"
+        j._save()
+    before = j.path.read_bytes()
+    with pytest.raises(ProviderError, match="cannot be safely retried automatically"):
+        _resume_rejected_profile(_provider(carrier), j)
+    assert j.path.read_bytes() == before
+    assert all(method == "GET" for method, _ in carrier.calls)
+
+
+def test_old_tag_migration_requires_a_verifiable_empty_profile_search(tmp_path):
+    carrier = _owned(Carrier())
+    j = _rejected_profile_attempt(tmp_path)
+    before = j.path.read_bytes()
+    def handler(req):
+        if req.url.path == "/v2/outbound_voice_profiles":
+            assert req.method == "GET"
+            return httpx.Response(200, json={"data": []})  # missing pagination is not proof of an empty search
+        return carrier(req)
+    with pytest.raises(ProviderError, match="could not be verified"):
+        _resume_rejected_profile(_provider(handler), j)
+    assert j.path.read_bytes() == before and not carrier.profiles and not carrier.connections
+
+
+# Credential connections do not expose the subdomain controls used by IP/FQDN connections.
+
+
+def test_credential_api_omits_unsupported_subdomain_field_in_create_and_detail_responses():
+    carrier = Carrier()
+    provider = _provider(carrier)
+    request = _connection_record(inbound={"channel_limit": 1, "sip_subdomain_receive_settings": "only_my_connections"})
+    created = provider._call("POST", "/credential_connections", json=request)
+    detail = provider._call("GET", "/credential_connections/c1")
+    assert created["inbound"] == detail["inbound"] == {"channel_limit": 1}
+    assert created["sip_uri_calling_preference"] == detail["sip_uri_calling_preference"] == "disabled"
+    assert request["inbound"]["sip_subdomain_receive_settings"] == "only_my_connections"
+
+
+def test_fresh_credential_connection_succeeds_without_subdomain_response_field(tmp_path):
+    carrier = _owned(Carrier(), connection_id="previous-route")
+    sent = []
+
+    def handler(req):
+        if req.method == "POST" and req.url.path == "/v2/credential_connections":
+            body = json.loads(req.content)
+            sent.append(body)
+            assert "sip_subdomain_receive_settings" not in body["inbound"]
+            assert body["sip_uri_calling_preference"] == "disabled"
+        return carrier(req)
+
+    saved = Journal.open(tmp_path, "main", "telnyx")
+    result = _provider(handler).attach(saved, Number("+15550100001", None, None, False, "n9"),
+                                       "main", SIP_USER, SIP_PASSWORD)
+    assert result.state == saved.state == "ready"
+    assert len(sent) == len(carrier.connections) == len(carrier.profiles) == 1
+    assert carrier.connections["c1"]["inbound"] == {"channel_limit": 1}
+    assert carrier.patches == [("n9", {"connection_id": "c1"})]
+    assert not carrier.orders
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_existing_uk_brought_connection_without_subdomain_field_retries_without_recreating(tmp_path, completed):
+    number = Number("+442079460000", None, None, False, "owned-uk", country="GB")
+    carrier = Carrier()
+    carrier.numbers["owned-uk"] = {"phone_number": number.e164, "connection_id": "previous-route"}
+    carrier.profiles["p1"] = {"name": "ai-phone:main", "traffic_type": "conversational",
+                              "whitelisted_destinations": ["CA", "GB", "US"]}
+    carrier.connections["c1"] = _connection_record()
+    connection_before = copy.deepcopy(carrier.connections["c1"])
+    profile_before = copy.deepcopy(carrier.profiles["p1"])
+    saved = Journal.open(tmp_path, "main", "telnyx")
+    saved.start("claim", phone_number=number.e164)
+    saved.finish("claim", brought_number_id="owned-uk", number_brought=True, previous_connection_id="previous-route")
+    saved.start("profile", name="ai-phone:main")
+    saved.finish("profile", outbound_voice_profile_id="p1")
+    saved.start("connection", name="ai-phone:main", user_name=SIP_USER)
+    if completed:
+        saved.finish("connection", connection_id="c1")
+
+    # A started step is what the former false POST-response mismatch left behind.
+    result = _provider(carrier).attach(saved, number, "main", SIP_USER, SIP_PASSWORD)
+    assert result.state == saved.state == "ready"
+    assert result.line["number"] == number.e164 and result.line["user"] == SIP_USER
+    assert saved.resources()["connection_id"] == "c1"
+    assert saved.resources()["previous_connection_id"] == "previous-route"
+    assert carrier.connections == {"c1": connection_before}
+    assert carrier.profiles == {"p1": profile_before}
+    assert ("GET", "/v2/credential_connections/c1") in carrier.calls
+    assert [(method, path) for method, path in carrier.calls if method != "GET"] == [
+        ("PATCH", "/v2/phone_numbers/owned-uk")]
+    assert carrier.patches == [("owned-uk", {"connection_id": "c1"})]
+    assert not carrier.orders
+
+
+# The fixture responses come from documented shapes, with synthetic values, rather than request echo.
+
+
+def test_documented_create_response_verifies_with_extra_read_only_fields():
+    response = contract_fixture("credential_connection_create.json")
+    provider = _provider(Carrier())
+    assert provider._connection(response, _connection_record(), read=False) == response
+    assert response["record_type"] == "credential_connection"
+
+
+def test_mock_uses_supported_fields_and_documented_defaults_only():
+    carrier = Carrier()
+    provider = _provider(carrier)
+    created = provider._call("POST", "/credential_connections", json={
+        "connection_name": "ai-phone:main", "user_name": SIP_USER, "password": SIP_PASSWORD,
+        "unexpected_request_field": "must-not-echo", "inbound": {"sip_subdomain_receive_settings": "from_anyone"},
+        "outbound": {"unexpected_nested_field": "must-not-echo"},
+    })
+    assert "unexpected_request_field" not in created
+    assert created["inbound"] == {"channel_limit": None}
+    assert created["outbound"] == {"channel_limit": None}
+    assert created["active"] is True and created["encode_contact_header_enabled"] is False
+    assert "sip_uri_calling_preference" not in created  # no documented default is invented
+    profile = provider._call("POST", "/outbound_voice_profiles", json={"name": "ai-phone:main", "arbitrary": "ignored"})
+    assert "arbitrary" not in profile
+    assert profile["traffic_type"] == "conversational" and profile["enabled"] is True
+    assert profile["whitelisted_destinations"] == ["US", "CA"]
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_masked_account_can_create_but_cannot_safely_reconcile_an_existing_password(tmp_path, completed):
+    carrier = _owned(Carrier(mask_passwords=True, crash_on=None if completed else "connection"), connection_id="previous-route")
+    provider = _provider(carrier)
+    saved = Journal.open(tmp_path, "main", "telnyx")
+    number = Number("+15550100001", None, None, False, "n9")
+    if completed:
+        assert provider.attach(saved, number, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    else:
+        with pytest.raises(ProviderError):
+            provider.attach(saved, number, "main", SIP_USER, SIP_PASSWORD)
+        assert "connection_id" not in saved.resources()
+    assert carrier.connections["c1"]["password"] == SIP_PASSWORD  # create returned the real synthetic password
+    before = copy.deepcopy((carrier.connections, carrier.profiles, carrier.numbers, saved.doc))
+    carrier.calls.clear()
+    carrier.crash_on = None
+    with pytest.raises(ProviderError, match="masks the SIP password") as error:
+        provider.attach(saved, number, "main", SIP_USER, SIP_PASSWORD)
+    assert "manual SIP trunk" in str(error.value) and "does not match" not in str(error.value)
+    assert SIP_PASSWORD not in str(error.value) and SIP_USER not in str(error.value)
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert (carrier.connections, carrier.profiles, carrier.numbers, saved.doc) == before
+    assert len(carrier.connections) == len(carrier.profiles) == 1
+
+
+def test_mask_token_is_never_accepted_as_password_equality():
+    response = contract_fixture("credential_connection_retrieve_masked.json")
+    with pytest.raises(ProviderError, match="masks the SIP password"):
+        _provider(Carrier())._connection(response, _connection_record(password="********"), read=False)
+
+
+@pytest.mark.parametrize("password", [None, "", 123, "missing"])
+def test_unavailable_password_is_reported_as_unverifiable_without_adoption(tmp_path, password):
+    carrier = Carrier()
+    saved = _connection_attempt(tmp_path, carrier)
+    record = _connection_record(password=password)
+    if password == "missing":
+        record.pop("password")
+    carrier.connections["c1"] = record
+    before = copy.deepcopy((carrier.connections, saved.doc))
+    with pytest.raises(ProviderError, match="did not return a verifiable SIP password") as error:
+        _resume_connection(_provider(carrier), saved)
+    assert "does not match" not in str(error.value)
+    assert SIP_PASSWORD not in str(error.value) and SIP_USER not in str(error.value)
+    assert (carrier.connections, saved.doc) == before
+    assert all(method == "GET" for method, _ in carrier.calls)
+
+
+def test_missing_password_in_create_response_pauses_then_resumes_from_readable_detail(tmp_path):
+    carrier = _owned(Carrier(), connection_id="previous-route")
+
+    def handler(req):
+        response = carrier(req)
+        if req.method == "POST" and req.url.path == "/v2/credential_connections":
+            body = response.json()
+            body["data"].pop("password")
+            return httpx.Response(response.status_code, json=body)
+        return response
+
+    provider = _provider(handler)
+    saved = Journal.open(tmp_path, "main", "telnyx")
+    number = Number("+15550100001", None, None, False, "n9")
+    with pytest.raises(ProviderError, match="verifiable SIP password"):
+        provider.attach(saved, number, "main", SIP_USER, SIP_PASSWORD)
+    assert not carrier.patches and "connection_id" not in saved.resources()
+    assert provider.attach(saved, number, "main", SIP_USER, SIP_PASSWORD).state == "ready"
+    assert carrier.calls.count(("POST", "/v2/credential_connections")) == 1
+    assert carrier.calls.count(("POST", "/v2/outbound_voice_profiles")) == 1
+    assert carrier.patches == [("n9", {"connection_id": "c1"})]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("active", "true"), ("encode_contact_header_enabled", 1), ("sip_uri_calling_preference", None),
+    ("inbound.channel_limit", "1"), ("outbound.channel_limit", None), ("outbound.outbound_voice_profile_id", 1),
+])
+def test_setting_diagnostics_name_fields_without_accepting_missing_or_wrong_types(tmp_path, field, value):
+    carrier = Carrier()
+    saved = _connection_attempt(tmp_path, carrier)
+    record = _connection_record()
+    target, _, leaf = field.rpartition(".")
+    (record[target] if target else record)[leaf] = value
+    carrier.connections["c1"] = record
+    with pytest.raises(ProviderError, match="Different fields") as error:
+        _resume_connection(_provider(carrier), saved)
+    assert f"Different fields: {field}." in str(error.value)
+    assert SIP_PASSWORD not in str(error.value) and SIP_USER not in str(error.value)
+    assert all(method == "GET" for method, _ in carrier.calls)
+    assert "connection_id" not in saved.resources()
