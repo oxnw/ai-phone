@@ -60,6 +60,12 @@ case "$1" in
   sync) exit 0;;
   run)
     shift
+    if [ "$1" = --no-sync ]; then
+      shift
+      [ "$*" = "python scripts/install_cli.py" ] || exit 95
+      printf 'launcher install\n' >> "$INSTALL_TEST_LOG"
+      exit 0
+    fi
     [ "$1" = python ] || exit 92
     shift
     exec "$INSTALL_TEST_PYTHON" -S "$@";;
@@ -95,7 +101,8 @@ def test_current_native_capability_skips_the_build(tmp_path):
     assert "already built (TLS verifier version 1)" in result.stdout
     assert "native build" not in calls
     assert not (repo / "native/pjsua2/build").exists()
-    assert "==> Ready" in result.stdout
+    assert "==> Installing the ai-phone command" in result.stdout
+    assert calls.count("launcher install\n") == 1
 
 
 @pytest.mark.parametrize("installed", [None, "old", 0, 2])
@@ -105,7 +112,8 @@ def test_missing_or_incompatible_native_capability_rebuilds(tmp_path, installed)
     assert calls.count("native build\n") == 1
     assert (repo / "src/ai_phone/vendor/_pjsua2_test.so").is_file()
     assert "return 1" in (repo / "src/ai_phone/vendor/pjsua2.py").read_text()
-    assert "==> Ready" in result.stdout
+    assert "==> Installing the ai-phone command" in result.stdout
+    assert calls.count("launcher install\n") == 1
 
 
 def test_native_build_failure_stops_before_installing_or_announcing_ready(tmp_path):
@@ -116,7 +124,8 @@ def test_native_build_failure_stops_before_installing_or_announcing_ready(tmp_pa
     assert calls.count("native build\n") == 1
     assert "old importable binding" in (repo / "src/ai_phone/vendor/pjsua2.py").read_text()
     assert not (repo / "src/ai_phone/vendor/_pjsua2_test.so").exists()
-    assert "==> Ready" not in result.stdout
+    assert "==> Installing the ai-phone command" not in result.stdout
+    assert "launcher install" not in calls
 
 
 def test_rebuilt_library_must_provide_the_required_capability(tmp_path):
@@ -126,4 +135,5 @@ def test_rebuilt_library_must_provide_the_required_capability(tmp_path):
     assert "native/pjsua2/README.md" in result.stderr
     assert calls.count("native build\n") == 1
     assert (repo / "src/ai_phone/vendor/_pjsua2_test.so").is_file()
-    assert "==> Ready" not in result.stdout
+    assert "==> Installing the ai-phone command" not in result.stdout
+    assert "launcher install" not in calls

@@ -50,7 +50,7 @@ caller audio → `rx_ring` → VAD (Silero, 32 ms chunks) → **speech_end after
 | TTS (Mac) | Direct mlx-audio, 24 kHz: `tts.engine: phonon` uses `gradium/phonon-31m-en` with `voice: default`, speed 1.0; `kokoro` uses `mlx-community/Kokoro-82M-bf16` with configurable English voice/speed (existing config default `af_heart`) | — |
 | VAD | Silero, 16 kHz, in the main process | — |
 | Linux (planned; no backend modules yet) | sherpa-onnx or faster-whisper · llama-cpp-python CUDA · kokoro-onnx · silero-vad | — |
-| Install | clone the repo, ./scripts/install.sh, uv run ai-phone setup | Homebrew tap, Docker, PyPI (dropped 2026-09-17) |
+| Install | clone the repo, ./scripts/install.sh, ai-phone setup | Homebrew tap, Docker, PyPI (dropped 2026-09-17) |
 | License | AGPLv3 (PJSIP is GPLv2-or-later; §13 permits) | MIT/Apache |
 
 ## Call rules
@@ -104,7 +104,7 @@ Any AI that can run shell commands uses ai-phone as its phone, in one of two mod
 
 ## Get started (Milestone 4)
 
-No packages: people clone the repo, run `./scripts/install.sh` (Homebrew's swig, pkgconf and pjproject, `uv sync`, then the SIP library build into `src/ai_phone/vendor/`), then `uv run ai-phone setup`. Setup is a full-screen wizard (numbered prompts with `--plain` or without a terminal) that asks only what applies: where the agent thinks (this Mac, or your own endpoint), a line (a new or existing Twilio/Telnyx number, an existing SignalWire number, a free SIP address, or your own trunk), a voice, and what callers hear; it then checks the models, the config, the lines and the voice, and ends with how to start ai-phone and what to tell your AI. Everything it saves goes under `~/.ai-phone/` (`config.yaml`, `secrets.env`, the carrier journals), and a step's answers are written only when the step completes. `ai-phone models pull` is the same download without the wizard. Carrier and endpoint requests happen only in `lines`, `models pull` and `setup`, never in the daemon. Full detail in `architecture.md` §10.
+No packages: people clone the repo, run `./scripts/install.sh` (Homebrew's swig, pkgconf and pjproject, `uv sync`, then the SIP library build into `src/ai_phone/vendor/`), then run `ai-phone setup`. The installer adds the `ai-phone` launcher to `~/.local/bin` (with PATH guidance if needed). The launcher uses this checkout and its Python environment from any working directory; `uv run ai-phone` remains available from the checkout. Setup is a full-screen wizard (numbered prompts with `--plain` or without a terminal) that asks only what applies: where the agent thinks (this Mac, or your own endpoint), a line (a new or existing Twilio/Telnyx number, an existing SignalWire number, a free SIP address, or your own trunk), a voice, and what callers hear; it then checks the models, the config, the lines and the voice, and ends with how to start ai-phone and what to tell your AI. Everything it saves goes under `~/.ai-phone/` (`config.yaml`, `secrets.env`, the carrier journals), and a step's answers are written only when the step completes. `ai-phone models pull` is the same download without the wizard. Carrier and endpoint requests happen only in `lines`, `models pull` and `setup`, never in the daemon. Full detail in `architecture.md` §10.
 
 ## Milestone gates
 

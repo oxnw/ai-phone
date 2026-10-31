@@ -12,7 +12,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import ai_phone
 from ai_phone import models, paths, voices
 from ai_phone.carriers import CARRIERS as CARRIER_INFO, managed_caller_id
 from ai_phone.config import E164_RE, HOST_RE, LINE_ID_RE, SIP_USER_RE
@@ -46,8 +45,8 @@ CALLER_ID_WAIT_SEC = 120   # how long to wait while the carrier's call asks for 
 CALLER_ID_POLL_SEC = 3
 TRANSPORTS = ("udp", "tcp", "tls")
 DOWNLOAD_LEFT = "Setup cancelled. The download stops now and picks up where it left off next time."
-HALF_DONE = ("That carrier step may be half done. See your lines with: uv run ai-phone lines list\n"
-             "then finish one with: uv run ai-phone lines resume <line>, or undo it with: uv run ai-phone lines remove <line>")
+HALF_DONE = ("That carrier step may be half done. See your lines with: ai-phone lines list\n"
+             "then finish one with: ai-phone lines resume <line>, or undo it with: ai-phone lines remove <line>")
 
 
 @dataclass
@@ -517,17 +516,17 @@ def phone_number(ui, actions, session: Session) -> None:
                 page = Page(LINE, "An earlier setup needs attention",
                             "Finish or undo the unfinished setup before connecting this number. Use the original carrier "
                             "account. A failed cleanup must be completed before retrying.",
-                            body="See the line and its state: uv run ai-phone lines list\n"
+                            body="See the line and its state: ai-phone lines list\n"
                                  "To resume a SignalWire line:\n"
-                                 "uv run ai-phone lines resume <line> --key-env SIGNALWIRE_PROJECT_ID "
+                                 "ai-phone lines resume <line> --key-env SIGNALWIRE_PROJECT_ID "
                                  "--secret-env SIGNALWIRE_API_TOKEN\n"
                                  "To undo a SignalWire setup:\n"
-                                 "uv run ai-phone lines remove <line> --key-env SIGNALWIRE_PROJECT_ID "
+                                 "ai-phone lines remove <line> --key-env SIGNALWIRE_PROJECT_ID "
                                  "--secret-env SIGNALWIRE_API_TOKEN\n"
                                  "The saved SIGNALWIRE_SPACE is used; other carriers need their own credentials.")
             elif owned:
                 page = Page(LINE, f"No unconnected numbers on this {name} account",
-                            "These numbers are already configured. Check them with: uv run ai-phone lines list")
+                            "These numbers are already configured. Check them with: ai-phone lines list")
             else:
                 page = Page(LINE, f"No unconnected numbers on this {name} account",
                             f"Buy a voice-capable number in your {name} Space, then run setup again to connect it. "
@@ -563,8 +562,8 @@ def phone_number(ui, actions, session: Session) -> None:
 def line_note(result: LineResult, number: str, carrier: str, bought: bool) -> str:
     line_id = result.line_id
     if result.code != 0:
-        return (f"line {line_id} ({number}, not finished: uv run ai-phone lines resume {line_id}, "
-                f"or uv run ai-phone lines remove {line_id})")
+        return (f"line {line_id} ({number}, not finished: ai-phone lines resume {line_id}, "
+                f"or ai-phone lines remove {line_id})")
     return f"line {line_id} ({number}, a {carrier} number billed monthly)" if bought else f"line {line_id} ({number})"
 
 
@@ -699,17 +698,17 @@ def verify_caller_id(ui, actions, session: Session, carrier: str, name: str, cre
                 actions.record_caller_id(line_id, mine, carrier)
             session.note(f"line {line_id} calls out as {mine}")
         except ActionError as e:  # the carrier has accepted it by now: never lose that quietly
-            recovery = (f"Finish the caller-ID change with: uv run ai-phone lines resume {line_id} "
+            recovery = (f"Finish the caller-ID change with: ai-phone lines resume {line_id} "
                         "--key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN --space <space-host>"
                         if CARRIER_INFO[carrier].managed_caller_id else
-                        f"{mine} is verified with {name}; run: uv run ai-phone lines verify-caller-id "
+                        f"{mine} is verified with {name}; run: ai-phone lines verify-caller-id "
                         f"{line_id} {mine} --key-env <NAME> to record it.")
             ui.choose(Page(stage, f"{mine} is verified, but not saved", recovery, error=str(e)),
                       [Option("Continue")], back=False)
     else:
         ui.choose(Page(stage, "Verification did not complete",
                        f"Your agent still calls out as {current}. To try again: "
-                       f"uv run ai-phone lines verify-caller-id {line_id} {mine} --key-env <NAME>"),
+                       f"ai-phone lines verify-caller-id {line_id} {mine} --key-env <NAME>"),
                   [Option("Continue")], back=False)
 
 
@@ -1069,9 +1068,9 @@ def check_models(ui, actions, session: Session, page: Page) -> Check:
     size = busy(ui, session, page, "Checking the download size…", actions.download_size)
     later = ui.choose(Page(CHECK, "Download the models now?", f"About {gb(size)}, saved in the Hugging Face cache. "
                            "ai-phone needs them to handle calls."),
-                      [Option("Download now", gb(size)), Option("Later", "run: uv run ai-phone models pull")]) == 1
+                      [Option("Download now", gb(size)), Option("Later", "run: ai-phone models pull")]) == 1
     if later:
-        return Check("Models", "not downloaded yet · uv run ai-phone models pull", None)
+        return Check("Models", "not downloaded yet · ai-phone models pull", None)
     try:
         progress(ui, session, Page(CHECK, "Downloading the models", "You can leave this running. It picks up where it "
                                    "stopped if interrupted."), "Downloading…", actions.pull_models)
@@ -1102,10 +1101,10 @@ def done(ui, actions, session: Session) -> None:
 
 
 WIDTH = 88  # the Done page shows this many columns without scrolling
-AI_COMMANDS = (('uv run ai-phone call +15550100000 --prompt "…" --json', "ai-phone's agent talks"),
-               ("uv run ai-phone call +15550100000 --relay --json", "your AI talks (say, listen)"),
-               ("uv run ai-phone listen --json", "wait for a call"),
-               ("uv run ai-phone hangup", "end the call"))
+AI_COMMANDS = (('ai-phone call +15550100000 --prompt "…" --json', "ai-phone's agent talks"),
+               ("ai-phone call +15550100000 --relay --json", "your AI talks (say, listen)"),
+               ("ai-phone listen --json", "wait for a call"),
+               ("ai-phone hangup", "end the call"))
 
 
 def saved_files() -> str:
@@ -1137,7 +1136,7 @@ def done_text(actions, session: Session) -> str:
     lifecycle = ("Leave ai-phone running while you want to receive calls." if cur.allow_inbound else
                  "Start ai-phone when you want to place a call; stop it with Ctrl-C afterward.")
     out += [f"Calls    {mode}", f"Brain    {brain_row}", f"Voice    {voice_row}",
-            "", "Start ai-phone", "  uv run ai-phone run", f"  {lifecycle}",
+            "", "Start ai-phone", "  ai-phone run", f"  {lifecycle}",
             "  If already running, stop and restart to apply these settings."]
     if cur.allow_inbound:
         out += ["", "Try it", *try_it(cur.lines)]
@@ -1145,10 +1144,10 @@ def done_text(actions, session: Session) -> str:
     if cur.allow_inbound:
         commands.append(AI_COMMANDS[2])
     elif cur.allow_outbound:
-        commands.append(("uv run ai-phone listen --call <id> --json", "listen to your relay call"))
+        commands.append(("ai-phone listen --call <id> --json", "listen to your relay call"))
     commands.append(AI_COMMANDS[3])
     width = max(len(command) for command, _ in commands)
-    out += ["", f"Give your AI the phone: from {tilde(Path(ai_phone.__file__).parents[2])}, it can run"]
+    out += ["", "Give your AI the phone: it can run these from any folder"]
     out += [f"  {command.ljust(width)}   {what}" for command, what in commands]
     return "\n".join(out)
 
@@ -1168,7 +1167,7 @@ def try_it(lines: dict[str, dict]) -> list[str]:
     if any(ln.get("kind", "trunk") == "trunk" and ln.get("from_user") == "account"
            and provider_of(ln).get("state", "ready") == "ready" for ln in lines.values()):
         return ["  call the number routed to your SIP account; check that route with your provider"]
-    return ["  nothing to call yet: the number is still being set up"] if lines else ["  add a line first: uv run ai-phone setup"]
+    return ["  nothing to call yet: the number is still being set up"] if lines else ["  add a line first: ai-phone setup"]
 
 
 def line_address(ln: dict) -> str:
