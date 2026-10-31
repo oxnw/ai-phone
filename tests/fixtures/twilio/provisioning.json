@@ -1,0 +1,180 @@
+{
+  "provenance": {
+    "kind": "Synthetic contract examples; never captured from an account",
+    "checked": "2026-10-29",
+    "sources": [
+      "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_api_v2010.json",
+      "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_trunking_v1.json",
+      "https://www.twilio.com/docs/voice/sip/api/sip-credential-resource"
+    ],
+    "notes": "Responses contain representative documented fields, not every optional field. Form parameters use PascalCase; JSON responses use snake_case. SIP credential responses omit passwords. Registration is a JSON boolean. Classic list responses use next_page_uri; Trunking v1 uses meta.next_page_url. All identities and timestamps are invented."
+  },
+  "request_fields": {
+    "credential_list": [
+      "FriendlyName"
+    ],
+    "credential": [
+      "Username",
+      "Password"
+    ],
+    "domain": [
+      "DomainName",
+      "FriendlyName",
+      "VoiceUrl",
+      "VoiceMethod",
+      "VoiceFallbackUrl",
+      "VoiceFallbackMethod",
+      "VoiceStatusCallbackUrl",
+      "VoiceStatusCallbackMethod",
+      "SipRegistration",
+      "EmergencyCallingEnabled",
+      "Secure",
+      "ByocTrunkSid",
+      "EmergencyCallerSid"
+    ],
+    "domain_mapping": [
+      "CredentialListSid"
+    ],
+    "number": [
+      "ApiVersion",
+      "FriendlyName",
+      "SmsApplicationSid",
+      "SmsFallbackMethod",
+      "SmsFallbackUrl",
+      "SmsMethod",
+      "SmsUrl",
+      "StatusCallback",
+      "StatusCallbackMethod",
+      "VoiceApplicationSid",
+      "VoiceCallerIdLookup",
+      "VoiceFallbackMethod",
+      "VoiceFallbackUrl",
+      "VoiceMethod",
+      "VoiceUrl",
+      "EmergencyStatus",
+      "EmergencyAddressSid",
+      "TrunkSid",
+      "IdentitySid",
+      "AddressSid",
+      "VoiceReceiveMode",
+      "BundleSid",
+      "PhoneNumber",
+      "AreaCode"
+    ],
+    "trunk": [
+      "FriendlyName",
+      "DomainName",
+      "DisasterRecoveryUrl",
+      "DisasterRecoveryMethod",
+      "TransferMode",
+      "Secure",
+      "CnamLookupEnabled",
+      "TransferCallerId"
+    ],
+    "trunk_mapping": [
+      "CredentialListSid"
+    ]
+  },
+  "response_templates": {
+    "credential_list": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "date_updated": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "sid": "CL00000000000000000000000000000001",
+      "friendly_name": "ai-phone:fixture"
+    },
+    "credential": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "date_updated": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "sid": "CR00000000000000000000000000000001",
+      "credential_list_sid": "CL00000000000000000000000000000001",
+      "username": "fixture1234"
+    },
+    "domain": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "date_updated": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "sid": "SD00000000000000000000000000000001",
+      "domain_name": "fixture.sip.twilio.com",
+      "friendly_name": "ai-phone:fixture",
+      "sip_registration": true,
+      "voice_method": "POST",
+      "voice_url": null,
+      "voice_fallback_url": null,
+      "secure": false
+    },
+    "domain_mapping": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "date_updated": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "sid": "CL00000000000000000000000000000001",
+      "friendly_name": "ai-phone:fixture"
+    },
+    "number": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "date_updated": "Thu, 29 Oct 2026 12:00:00 +0000",
+      "sid": "PN00000000000000000000000000000001",
+      "phone_number": "+15550100001",
+      "friendly_name": "ai-phone:fixture",
+      "voice_url": null,
+      "voice_method": "POST",
+      "voice_application_sid": null,
+      "trunk_sid": null,
+      "capabilities": {
+        "voice": true,
+        "sms": true,
+        "mms": false
+      }
+    },
+    "trunk": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "2026-10-29T12:00:00Z",
+      "date_updated": "2026-10-29T12:00:00Z",
+      "sid": "TK00000000000000000000000000000001",
+      "domain_name": "fixture.pstn.twilio.com",
+      "friendly_name": "ai-phone:fixture",
+      "secure": false,
+      "cnam_lookup_enabled": false,
+      "symmetric_rtp_enabled": false,
+      "recording": {
+        "mode": "do-not-record",
+        "trim": "do-not-trim"
+      },
+      "transfer_mode": "disable-all",
+      "auth_type": ""
+    },
+    "trunk_mapping": {
+      "account_sid": "AC00000000000000000000000000000001",
+      "date_created": "2026-10-29T12:00:00Z",
+      "date_updated": "2026-10-29T12:00:00Z",
+      "sid": "CL00000000000000000000000000000001",
+      "trunk_sid": "TK00000000000000000000000000000001",
+      "friendly_name": "ai-phone:fixture"
+    }
+  },
+  "pagination_templates": {
+    "classic": {
+      "page": 0,
+      "page_size": 100,
+      "start": 0,
+      "end": 0,
+      "next_page_uri": null,
+      "previous_page_uri": null,
+      "first_page_uri": "",
+      "uri": ""
+    },
+    "trunking": {
+      "meta": {
+        "page": 0,
+        "page_size": 100,
+        "next_page_url": null,
+        "previous_page_url": null,
+        "first_page_url": "",
+        "url": "",
+        "key": ""
+      }
+    }
+  }
+}
