@@ -9,14 +9,27 @@ Setup, carrier commands, brain configuration and the full agent command contract
 ```bash
 git clone https://github.com/oxnw/ai-phone.git && cd ai-phone
 ./scripts/install.sh        # the SIP library and the Python environment (needs Homebrew and uv)
-uv run ai-phone setup       # choose call directions, a brain, a line and a voice; downloads and checks models
-uv run ai-phone run         # start ai-phone
+ai-phone setup              # choose call directions, a brain, a line and a voice; downloads and checks models
+ai-phone run                # start ai-phone
 ```
 
 `setup` saves everything under `~/.ai-phone/` (`config.yaml`, and keys and passwords in `secrets.env`, both
-readable only by you) and changes only what you pick when you run it again. `uv run ai-phone setup --plain` asks the
-same questions as plain prompts. The models go to the Hugging Face cache; `uv run ai-phone models pull` fetches them
-without the wizard. The commands below are written as `ai-phone …`; from the repo folder that is `uv run ai-phone …`.
+readable only by you) and changes only what you pick when you run it again. `ai-phone setup --plain` asks the
+same questions as plain prompts. The models go to the Hugging Face cache; `ai-phone models pull` fetches them
+without the wizard. The installer puts an `ai-phone` launcher in `~/.local/bin`, so every command works
+from any folder. If that directory is missing from PATH, the installer prints the command to add it;
+put that same PATH setting in your shell profile for new terminals. Keep the checkout and its `.venv`
+in place: the launcher uses them directly. After moving the checkout, rebuild its environment with
+`./scripts/install.sh`, then explicitly replace the old launcher from the new checkout with
+`.venv/bin/python scripts/install_cli.py --replace`.
+
+For an existing installation, add just the launcher from the repo folder without rebuilding dependencies:
+
+```bash
+.venv/bin/python scripts/install_cli.py
+```
+
+`uv run ai-phone …` still works from the repository for development.
 
 Setup first asks whether to **receive and place calls**, **place calls only**, or **receive calls only**.
 Receiving calls needs `ai-phone run` to stay running while you want to be reachable. For outgoing calls only,
@@ -34,7 +47,7 @@ restart a running daemon to apply the selection.
 The Voice step offers Phonon 31M English (streaming, one bundled voice at normal speed) and Kokoro
 (American and British voices, adjustable speed). Both run directly through MLX in the daemon's TTS worker.
 Existing configurations keep Kokoro. To select Phonon by hand, set
-`tts: {engine: phonon, voice: default, speed: 1.0}`, run `uv run ai-phone models pull`, then restart the daemon.
+`tts: {engine: phonon, voice: default, speed: 1.0}`, run `ai-phone models pull`, then restart the daemon.
 Only the selected speech model is required; voices and weights are loaded from disk before calls begin.
 
 No carrier yet? Enable receiving calls, pick "A SIP address" in setup and keep the default name `agent`. Talk to it locally with

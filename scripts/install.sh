@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/install.sh — get a clone of ai-phone ready to run: the SIP library and the Python environment.
-# Safe to run again. It never touches ~/.ai-phone and downloads no models (`uv run ai-phone setup` does that).
+# Safe to run again. It never touches ~/.ai-phone and downloads no models (`ai-phone setup` does that).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,5 +35,5 @@ else
   sip_binding_ready || fail "the SIP library was built but cannot load TLS verifier version 1; see native/pjsua2/README.md"
 fi
 
-step "Ready"
-echo "Next: uv run ai-phone setup"
+step "Installing the ai-phone command"
+uv run --no-sync python scripts/install_cli.py

@@ -540,7 +540,7 @@ NARROW_DONE = "\n".join([
     "Voice    Heart · American · female · 1.0×",
     "",
     "Start ai-phone",
-    "  uv run ai-phone run",
+    "  ai-phone run",
     "  Leave ai-phone running while you want to receive calls.",
     "  If already running, stop and restart to apply these settings.",
     "",
@@ -1023,7 +1023,6 @@ async def test_a_wide_body_wraps_on_a_narrow_terminal(tmp_path, monkeypatch):
     # Keep this layout fixture independent of checkout/home path lengths and any real saved settings.
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path / ".ai-phone"))
-    monkeypatch.setattr(flow, "ai_phone", types.SimpleNamespace(__file__="/example/ai-phone/src/ai_phone/__init__.py"))
     summary = flow.done_text(FakeActions(exists=True, lines={"twilio": NUMBER_LINE, "agent": SIP_LINE}), flow.Session())
     done = Page(7, "You're set up", "Everything is saved. Here's how to use it.", body=summary)
     app = SetupApp(lambda ui: Outcome(ui.choose(done, [Option("Finish")], back=False)))
@@ -1118,6 +1117,6 @@ def test_run_setup_names_a_purchase_that_a_second_ctrl_c_left(monkeypatch, capsy
     assert run_setup() == 1
     assert capsys.readouterr().out == (
         "Setup stopped during: Buying +15550100001 and connecting it…\n"
-        "That carrier step may be half done. See your lines with: uv run ai-phone lines list\n"
-        "then finish one with: uv run ai-phone lines resume <line>, or undo it with: uv run ai-phone lines remove <line>\n")
+        "That carrier step may be half done. See your lines with: ai-phone lines list\n"
+        "then finish one with: ai-phone lines resume <line>, or undo it with: ai-phone lines remove <line>\n")
     release.set()

@@ -243,7 +243,9 @@ def test_run_setup_plain_end_to_end(typed, capsys, monkeypatch, tmp_path):
     assert made == [tmp_path / "config.yaml"]
     assert made_actions.changes() == ["save_call_directions", "save_brain_local", "add_sip_line", "save_voice", "save_callers"]
     out = capsys.readouterr().out
-    assert out.count("uv run ai-phone run") == 1  # the summary is the Done page's body, printed once
+    # Count the summary heading, since earlier guidance also mentions the run command.
+    assert out.count("Start ai-phone\n") == 1  # the Done page body is printed once
+    assert "  Start ai-phone\n    ai-phone run\n" in out
     assert "  pjsua --local-port 5070 sip:agent@127.0.0.1" in out
     assert out.splitlines()[-2:] == ["  1) Finish", "Choose [1]: "]
     assert not typed.answers
