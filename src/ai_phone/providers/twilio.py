@@ -47,10 +47,10 @@ class TwilioProvider:
     def _call(self, method: str, url: str, **kw) -> dict:
         shown = self._redact(url.split("?")[0])
         try:
-            r = self.http.request(method, url, timeout=20.0, **kw)  # per request, so an injected client cannot bypass it
+            r = self.http.request(method, url, timeout=20.0, follow_redirects=False, **kw)  # per request, so an injected client cannot bypass it
         except httpx.HTTPError as e:
             raise ProviderError(f"twilio {method} {shown}: {type(e).__name__}", retryable=True) from None
-        if r.status_code >= 400:
+        if r.status_code >= 300:
             try:
                 msg = str(r.json().get("message", ""))[:300]  # the carrier's message, never the body
             except ValueError:
@@ -61,6 +61,56 @@ class TwilioProvider:
 
     def _acct(self, path: str) -> str:
         return f"{API}/{self.sid}{path}"
+
+    def _list(self, url: str, key: str, *, params: dict | None = None) -> list[dict]:
+        """Read both Twilio pagination dialects without leaving this exact collection."""
+        origin = urllib.parse.urlsplit(url)
+        trunking = url.startswith(f"{TRUNKING}/")
+        current = str(httpx.URL(url, params={"PageSize": "100", **(params or {})}))
+        seen, records = set(), []
+        for _ in range(100):
+            try:
+                parsed = urllib.parse.urlsplit(current)
+            except ValueError:
+                raise ProviderError("Twilio returned an invalid pagination link.") from None
+            if (parsed.scheme != "https" or parsed.netloc != origin.netloc or parsed.path != origin.path
+                    or parsed.username is not None or parsed.password is not None or parsed.fragment):
+                raise ProviderError("Twilio returned an unsafe pagination link; no further request was sent.")
+            if current in seen:
+                raise ProviderError("Twilio repeated a pagination link; the resource search is incomplete.")
+            seen.add(current)
+            page = self._call("GET", current)
+            rows = page.get(key) if isinstance(page, dict) else None
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise ProviderError("Twilio returned an invalid resource list; the resource search is incomplete.")
+            records.extend(rows)
+            # The configured endpoint determines the dialect. Missing or mixed metadata must not
+            # turn an incomplete recovery search into an empty result that permits another creation.
+            if trunking:
+                meta = page.get("meta")
+                if not isinstance(meta, dict) or "next_page_url" not in meta or "next_page_uri" in page:
+                    raise ProviderError("Twilio returned invalid pagination metadata; the resource search is incomplete.")
+                following = meta["next_page_url"]
+            else:
+                if "next_page_uri" not in page or "meta" in page:
+                    raise ProviderError("Twilio returned invalid pagination metadata; the resource search is incomplete.")
+                following = page["next_page_uri"]
+            if following is None:
+                return records
+            if not isinstance(following, str) or not following:
+                raise ProviderError("Twilio returned an invalid pagination link.")
+            try:
+                current = urllib.parse.urljoin(current, following)
+            except ValueError:
+                raise ProviderError("Twilio returned an invalid pagination link.") from None
+        raise ProviderError("Twilio's resource search exceeded the page limit; no new resource was created.")
+
+    @staticmethod
+    def _unique(records: list[dict], field: str, value: str) -> dict | None:
+        matches = [record for record in records if record.get(field) == value]
+        if len(matches) > 1:
+            raise ProviderError("Twilio returned multiple matching resources. Review them in the Twilio console before retrying.")
+        return matches[0] if matches else None
 
     # ---- numbers ------------------------------------------------------------------------------
     def search_numbers(self, country: str, area: str | None, limit: int) -> list[Number]:
@@ -79,7 +129,7 @@ class TwilioProvider:
 
     def owned_numbers(self) -> list[Number]:
         """The voice numbers already on the account. Read-only: this is also the free key check."""
-        recs = self._call("GET", self._acct("/IncomingPhoneNumbers.json"), params={"PageSize": "100"}).get("incoming_phone_numbers", [])
+        recs = self._list(self._acct("/IncomingPhoneNumbers.json"), "incoming_phone_numbers")
         return [Number(r["phone_number"], None, None, False, r["sid"]) for r in recs if (r.get("capabilities") or {}).get("voice", True)]
 
     # ---- provisioning -------------------------------------------------------------------------
@@ -225,26 +275,27 @@ class TwilioProvider:
                                         f"Trunking; after upgrading, run `ai-phone lines resume <line> --key-env … --secret-env …` to add outbound.", line)
 
     def _find_credlist(self, name):
-        return next((c for c in self._call("GET", self._acct("/SIP/CredentialLists.json")).get("credential_lists", []) if c.get("friendly_name") == name), None)
+        return self._unique(self._list(self._acct("/SIP/CredentialLists.json"), "credential_lists"), "friendly_name", name)
 
     def _find_credential(self, cl_sid, user):
-        return next((c for c in self._call("GET", self._acct(f"/SIP/CredentialLists/{cl_sid}/Credentials.json")).get("credentials", []) if c.get("username") == user), None)
+        return self._unique(self._list(self._acct(f"/SIP/CredentialLists/{cl_sid}/Credentials.json"), "credentials"), "username", user)
 
     def _domain_has_mapping(self, domain_sid, cl_sid):
         return any(m.get("sid") == cl_sid or m.get("credential_list_sid") == cl_sid
-                   for m in self._call("GET", self._acct(f"/SIP/Domains/{domain_sid}/Auth/Registrations/CredentialListMappings.json")).get("contents", []))
+                   for m in self._list(self._acct(f"/SIP/Domains/{domain_sid}/Auth/Registrations/CredentialListMappings.json"), "contents"))
 
     def _trunk_has_credlist(self, trunk_sid, cl_sid):
-        return any(c.get("sid") == cl_sid for c in self._call("GET", f"{TRUNKING}/Trunks/{trunk_sid}/CredentialLists").get("credential_lists", []))
+        return any(c.get("sid") == cl_sid for c in self._list(f"{TRUNKING}/Trunks/{trunk_sid}/CredentialLists", "credential_lists"))
 
     def _find_domain(self, domain_name):
-        return next((d for d in self._call("GET", self._acct("/SIP/Domains.json")).get("domains", []) if d.get("domain_name") == domain_name), None)
+        return self._unique(self._list(self._acct("/SIP/Domains.json"), "domains"), "domain_name", domain_name)
 
     def _find_number(self, e164):
-        return next(iter(self._call("GET", self._acct("/IncomingPhoneNumbers.json"), params={"PhoneNumber": e164}).get("incoming_phone_numbers", [])), None)
+        return self._unique(self._list(self._acct("/IncomingPhoneNumbers.json"), "incoming_phone_numbers", params={"PhoneNumber": e164}),
+                            "phone_number", e164)
 
     def _find_trunk(self, name):
-        return next((t for t in self._call("GET", f"{TRUNKING}/Trunks").get("trunks", []) if t.get("friendly_name") == name), None)
+        return self._unique(self._list(f"{TRUNKING}/Trunks", "trunks"), "friendly_name", name)
 
     def release(self, journal: Journal) -> ReleaseResult:
         r = journal.resources()
