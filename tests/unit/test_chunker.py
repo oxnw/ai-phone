@@ -15,17 +15,17 @@ def test_sentence_punctuation_always_emits():
     assert run(["Hi", "."]) == ["Hi."]
 
 
-def test_clause_punctuation_needs_min_tokens():
-    # first unit: clause break allowed from 4 tokens; later units need 6
+def test_clause_punctuation_needs_min_words():
+    # first unit: clause break allowed from 4 words; later units need 6
     assert run(["Yes", ",", " I", " can", " do", " that", ",", " sure", "."]) == ["Yes, I can do that,", "sure."]
-    assert run(["Well", ",", " yes", ",", " I", " can", " do", " that", "."]) == ["Well, yes,", "I can do that."]
+    assert run(["Well", ",", " yes", ",", " I", " can", " do", " that", "."]) == ["Well, yes, I can do that."]
 
 
-def test_max_tokens_emits_without_punctuation():
+def test_max_words_emits_without_punctuation():
     toks = [f" w{i}" for i in range(24)]
-    out = run(toks, max_tokens=12, first_max_tokens=8)
-    assert out[0].split() == [f"w{i}" for i in range(8)]           # first unit: 8 tokens
-    assert out[1].split() == [f"w{i}" for i in range(8, 20)]       # later units: 12 tokens
+    out = run(toks, max_words=12, first_max_words=8)
+    assert out[0].split() == [f"w{i}" for i in range(8)]           # first unit: 8 complete words
+    assert out[1].split() == [f"w{i}" for i in range(8, 20)]       # later units: 12 complete words
     assert len(out) == 3
 
 
@@ -56,16 +56,17 @@ def test_end_marker_glued_to_the_sentence():
 
 
 def test_partial_marker_is_held_back_until_complete():
-    c = ClauseChunker(max_tokens=2, first_max_tokens=2)
+    c = ClauseChunker(max_words=2, first_max_words=2)
     assert c.feed("Okay") == []
-    assert c.feed(" [EN") == []          # would hit max_tokens, but the buffer ends with a partial marker
-    assert c.feed("D]") == ["Okay"]      # complete marker: emitted without it
-    assert c.ended
+    assert c.feed(" [EN") == []          # a partial marker must never enter synthesis
+    assert c.feed("D]") == []
+    assert c.ended and c.flush() == ["Okay"]
 
 
 def test_no_marker_means_not_ended():
     c = ClauseChunker()
-    assert c.feed("Hello.") == ["Hello."] and not c.ended and c.flush() == []
+    assert c.feed("Hello.") == []  # wait for a boundary or end of stream
+    assert not c.ended and c.flush() == ["Hello."]
 
 
 def test_marker_alone_emits_nothing():
@@ -90,10 +91,10 @@ def test_lowercase_marker_is_removed_and_flagged():
 
 
 def test_mixed_case_partial_marker_is_held_then_removed():
-    c = ClauseChunker(max_tokens=1, first_max_tokens=1)
-    assert c.feed("Bye [En") == []       # would hit max_tokens, but the buffer ends with a partial marker
-    assert c.feed("d]") == ["Bye"]
-    assert c.ended
+    c = ClauseChunker(max_words=1, first_max_words=1)
+    assert c.feed("Bye [En") == []       # a partial marker must never enter synthesis
+    assert c.feed("d]") == []
+    assert c.ended and c.flush() == ["Bye"]
 
 
 def feed_all(toks):
