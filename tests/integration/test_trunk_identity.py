@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import signal
 import socket
 import subprocess
 import sys
@@ -195,21 +194,28 @@ class TrunkPeer:
 
 
 def _cleanup(proc):
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            break
+    if proc.poll() is None:
+        # Popen guards against signalling an already-reaped child. Its PJSIP
+        # threads end with it; no model workers are started by CHILD.
+        proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            continue
-    proc.wait(timeout=5)
-    try:
-        os.killpg(proc.pid, 0)
-    except ProcessLookupError:
-        return
-    raise AssertionError(f"test process group {proc.pid} survived cleanup")
+            proc.kill()
+            proc.wait(timeout=5)
+    # FrameRing starts Python's shared-memory resource tracker. After CHILD
+    # closes its pipe, that helper needs time to unlink resources and exit.
+    # Never send a destructive group signal after the group leader is reaped:
+    # it could kill the tracker mid-cleanup or target a reused numeric PGID.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"test process group {proc.pid} survived cleanup")
+        time.sleep(0.05)
 
 
 @pytest.mark.parametrize("from_user", ["number", "account"])

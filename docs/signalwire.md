@@ -149,7 +149,7 @@ reports resources requiring attention. Restart a running daemon after line confi
 
 ## Verification status
 
-On 2026-10-31, the standalone SignalWire branch passed 1,489 unit tests and 52 local SIP/TLS checks against
+On 2026-10-31, the standalone SignalWire branch passed 1,496 unit tests and 52 local SIP/TLS checks against
 its rebuilt native binding. The latter include 41 certificate/isolation/lifecycle cases and two registration
 tests through the actual Python binding. Local tests use temporary settings, synthetic credentials and fake
 models; they do not register with a carrier or place real calls.

@@ -1012,7 +1012,7 @@ Local tests cover identity negotiation, certificate policy and adapter behavior.
 TLS succeeded on 2026-10-30. On 2026-10-31, SignalWire-to-Telnyx and Telnyx-to-SignalWire calls connected, exchanged
 speech in both directions, showed the expected originating caller-ID numbers and ended normally; inbound
 automatic answer also worked. These calls used US numbers and a combined development preview containing other
-pending changes. The standalone SignalWire branch subsequently passed 1,489 unit tests and 52 local SIP/TLS
+pending changes. The standalone SignalWire branch subsequently passed 1,496 unit tests and 52 local SIP/TLS
 checks against its rebuilt native binding; it has not had a separate live-call run.
 
 The calls establish basic carrier integration in that setup, not perfect transcription, perceptual voice quality,

@@ -87,7 +87,7 @@ number. `from_user: account` uses the SIP username in outbound From;
 the endpoint's `send_as` controls the displayed number and is changed through CLI/setup. Existing trunks default to
 `from_user: number`. Manual account-mode trunks use the carrier portal for caller ID. Real calls in both
 directions exchanged speech, showed the expected caller-ID numbers and ended normally on 2026-10-31 using a
-combined development preview between US numbers. The standalone SignalWire branch passed 1,489 unit tests
+combined development preview between US numbers. The standalone SignalWire branch passed 1,496 unit tests
 and 52 local SIP/TLS checks. These calls
 are not a latency or voice-quality benchmark. See [the setup guide](docs/signalwire.md) for scope and limits.
 
