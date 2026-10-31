@@ -96,6 +96,16 @@ ai-phone status
 
 During a call the daemon opens no network connection except SIP/RTP to the peer and, only if you configured one, HTTP(S) to that brain endpoint. Buying or connecting a number talks to the carrier once, from the `lines` command or `setup`, and the daemon never loads the carrier code. Provisioning is journaled: `ai-phone lines resume` picks up where a crash left off, `ai-phone lines remove` deletes what ai-phone created at the carrier (a number you brought is disconnected and stays on your account) and lists exactly what is left for you to remove in the portal if a deletion fails — or, if the journal recording what was created has gone missing, refuses rather than delete the local record of a number that is still billing. Configuration applies at restart. The NAT and transport checks run before calling it done are in [nat-checklist.md](nat-checklist.md); the 24 h registration soak is `scripts/soak.sh`.
 
+Telnyx and Twilio recovery stops if a resource search is incomplete or multiple resources match. If the error
+reports duplicates, review the matching resources in the carrier portal before retrying `ai-phone lines resume`
+for the same line. Telnyx also pauses before changing number routing when the connection's credentials or settings
+differ from the saved setup; review the reported fields in the portal before resuming. Recovery does not overwrite
+existing SIP credentials to make them match.
+
+Some Telnyx accounts mask existing SIP passwords in API responses, which prevents ai-phone from verifying them.
+If setup reports this, complete the connection's number routing in the Telnyx portal, then run `ai-phone setup`
+and choose **My own SIP trunk** with the connection's known SIP username and password.
+
 What an incoming call hears is set by one `inbound:` section of the config: a greeting that plays on every incoming
 call, and the instructions ai-phone's own model follows when no AI is waiting in `ai-phone listen` (the example config
 takes a message).
@@ -158,6 +168,10 @@ Tell your agent it has the `ai-phone` command. It has two ways to make a call.
 ai-phone call +15555550100 --json \
   --prompt "Ask whether they have a table for two at 8 tonight, under the name Sam."
 ```
+
+Use `--prompt` to give the agent a specific task. If it is omitted, empty or only whitespace, the model is
+instructed to have a brief natural conversation, answer the recipient and acknowledge that no task was supplied
+if asked. It is instructed not to invent a business purpose, a message from its owner or a test scenario.
 
 A phone agent `call` blocks until the call ends, which can take up to `conversation.max_call_sec` (600 seconds). With
 `--json` it also writes each progress event to stderr as one JSON line, starting with
