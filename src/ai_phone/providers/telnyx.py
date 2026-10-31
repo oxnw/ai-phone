@@ -1,6 +1,9 @@
 """Telnyx: credential SIP connection with registration, a number ordered onto it, an outbound voice profile.
-Every step is journaled and reconciled by name (`ai-phone:<line-id>`) so re-runs never duplicate resources."""
+Every step is journaled. Names locate candidates; credentials and recovery tags establish identity."""
 from __future__ import annotations
+
+import re
+from uuid import uuid4
 
 import httpx
 
@@ -57,7 +60,7 @@ class TelnyxProvider:
         self.http.headers["Authorization"] = f"Bearer {key}"
 
     # ---- http ---------------------------------------------------------------------------------
-    def _call(self, method: str, path: str, **kw) -> dict | list:
+    def _call(self, method: str, path: str, *, envelope: bool = False, **kw) -> dict | list:
         try:
             r = self.http.request(method, f"/v2{path}", timeout=20.0, **kw)  # per request, so an injected client cannot bypass it
         except httpx.HTTPError as e:
@@ -65,7 +68,14 @@ class TelnyxProvider:
         if r.status_code >= 400:
             raise ProviderError(f"telnyx {method} {path} -> {r.status_code}: {self._redact(_detail(r))}", retryable=r.status_code >= 500,
                                 status=r.status_code)
-        return r.json().get("data", {}) if r.content else {}
+        doc = r.json() if r.content else {}
+        data = doc.get("data", {})
+        if path.startswith("/credential_connections"):
+            # Later carrier errors may repeat credentials read during reconciliation.
+            for rec in data if isinstance(data, list) else [data]:
+                if isinstance(rec, dict):
+                    self._sensitive.extend(v for k in ("user_name", "password") if isinstance(v := rec.get(k), str))
+        return doc if envelope else data
 
     def _redact(self, text: str) -> str:
         for v in sorted((v for v in self._sensitive if v), key=len, reverse=True):
@@ -73,10 +83,98 @@ class TelnyxProvider:
         return text
 
     def _find(self, path: str, key: str, value: str) -> dict | None:
-        for item in self._call("GET", path, params={f"filter[{key}][contains]": value}) or []:
-            if item.get(key) == value:
-                return item
-        return None
+        """Search every page and reject ambiguity; a name is never ownership evidence."""
+        found = None
+        seen = set()
+        for page in range(1, 101):
+            doc = self._call("GET", path, envelope=True,
+                             params={f"filter[{key}][contains]": value, "page[number]": page, "page[size]": 100})
+            rows, meta = doc.get("data"), doc.get("meta")
+            if not isinstance(rows, list) or not isinstance(meta, dict):
+                raise ProviderError("Telnyx resource search could not be verified; no existing resource was adopted.")
+            total = meta.get("total_pages")
+            if (meta.get("page_number") != page or type(total) is not int or total < 0
+                    or (total < page and not (page == 1 and total == 0 and not rows))):
+                raise ProviderError("Telnyx resource search pagination could not be verified; retry later.")
+            for rec in rows:
+                rid = self._resource_id(rec)
+                if rid in seen:
+                    raise ProviderError("Telnyx resource search repeated a record; retry later.")
+                seen.add(rid)
+                if rec.get(key) == value:
+                    if found is not None:
+                        raise ProviderError("Multiple Telnyx resources have this setup name; review them in the Telnyx portal. "
+                                            "No existing resource was adopted.")
+                    found = rec
+            if page >= total:
+                return found
+        raise ProviderError("Telnyx resource search exceeded its page limit; no existing resource was adopted.")
+
+    @staticmethod
+    def _resource_id(rec: dict) -> str:
+        rid = rec.get("id") if isinstance(rec, dict) else None
+        if not isinstance(rid, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", rid):
+            raise ProviderError("Telnyx returned an invalid resource identity; no existing resource was adopted.")
+        return rid
+
+    @staticmethod
+    def _matches(rec: dict, expected: dict) -> bool:
+        # Additional carrier defaults are allowed. Destinations/tags are sets; their response order is immaterial.
+        if not isinstance(rec, dict):
+            return False
+        for key, value in expected.items():
+            actual = rec.get(key)
+            if isinstance(value, dict):
+                if not TelnyxProvider._matches(actual, value):
+                    return False
+            elif isinstance(value, list):
+                if not isinstance(actual, list) or not all(isinstance(item, str) for item in actual) or set(actual) != set(value):
+                    return False
+            elif type(actual) is not type(value) or actual != value:
+                return False
+        return True
+
+    @classmethod
+    def _different_fields(cls, actual: dict, expected: dict, prefix: str = "") -> list[str]:
+        """Return only our known field paths, never carrier values or credentials."""
+        out = []
+        for key, value in expected.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict) and isinstance(actual.get(key), dict):
+                out.extend(cls._different_fields(actual[key], value, path))
+            elif not cls._matches({key: actual.get(key)}, {key: value}):
+                out.append(path)
+        return out
+
+    def _connection(self, rec: dict, expected: dict, *, read: bool = True) -> dict:
+        rid = self._resource_id(rec)
+        if read:
+            try:
+                rec = self._call("GET", f"/credential_connections/{rid}")
+            except ProviderError as e:
+                if e.status == 404:
+                    raise ProviderError("The saved Telnyx connection no longer exists; review it in the Telnyx portal. "
+                                        "No number routing or credentials were changed.") from None
+                raise
+        actual_id = self._resource_id(rec)
+        password = rec.get("password")
+        if password == "********":
+            # Telnyx masks reads for accounts created from 2026-09-08, but returns create passwords.
+            # A stored ID or username cannot prove the remote password has not changed since creation.
+            raise ProviderError("Telnyx masks the SIP password for this account, so ai-phone cannot safely verify "
+                                "this existing connection. Complete its routing in the Telnyx portal and add it "
+                                "as a manual SIP trunk with known credentials. No number routing or existing "
+                                "SIP credentials were changed.")
+        if not isinstance(password, str) or not password:
+            raise ProviderError("Telnyx did not return a verifiable SIP password. Setup is paused before number routing; "
+                                "retry later, or complete the connection in the Telnyx portal and add a manual SIP "
+                                "trunk with known credentials. No existing SIP credentials were changed.")
+        different = (["id"] if actual_id != rid else []) + self._different_fields(rec, expected)
+        if different:
+            raise ProviderError("The Telnyx connection does not match this setup's saved SIP credentials or settings. "
+                                f"Different fields: {', '.join(different)}. Review the connection in the Telnyx portal; "
+                                "no number routing or credentials were changed.")
+        return rec
 
     # ---- numbers ------------------------------------------------------------------------------
     def search_numbers(self, country: str, area: str | None, limit: int) -> list[Number]:
@@ -150,44 +248,103 @@ class TelnyxProvider:
         return ProvisionResult("ready", f"{number.e164} is connected", self._line(journal, number.e164, "ready"))
 
     def _profile_and_connection(self, journal: Journal, number: Number, line_id: str, sip_user: str, sip_password: str) -> str:
-        """The outbound voice profile (or the account's own, when it may hold only one) and the credential connection."""
+        """Reconcile only our own attempt, and recheck completed connections before routing a number."""
+        self._sensitive.extend((sip_user, sip_password))
         name = f"ai-phone:{line_id}"
-        st, data = journal.start("profile", name=name)
-        if st != "done":
-            existing = self._find("/outbound_voice_profiles", "name", name) if st == "started" else None
+        # Existing steps must still describe this line's resource identity.
+        named_steps = [s for s in journal.doc["steps"] if s["name"] in ("profile", "connection")]
+        if any(s["planned"].get("name") != name for s in named_steps):
+            raise ProviderError("The Telnyx setup journal disagrees about its resource identity; review the setup before resuming.")
+        # Credential connections control direct SIP URI calls with sip_uri_calling_preference.
+        # SIP subdomain receive settings belong to other connection types and are absent here.
+        body = {"connection_name": name, "user_name": sip_user, "password": sip_password, "active": True,
+                "sip_uri_calling_preference": "disabled", "encode_contact_header_enabled": True,
+                "inbound": {"channel_limit": 1},
+                "outbound": {"channel_limit": 1}}
+        profile_id = journal.resources().get("outbound_voice_profile_id")
+        if profile_id:
+            body["outbound"]["outbound_voice_profile_id"] = profile_id
+        step = next((s for s in journal.doc["steps"] if s["name"] == "connection"), None)
+        if step and (step["planned"].get("name") != name or step["planned"].get("user_name") != sip_user):
+            raise ProviderError("The Telnyx setup journal disagrees with the saved SIP identity; review the setup before resuming.")
+        if step and step["status"] == "done":
+            existing = self._connection({"id": step["result"].get("connection_id")}, body)
+        else:
+            existing = self._find("/credential_connections", "connection_name", name)
             if existing:
-                journal.finish("profile", outbound_voice_profile_id=existing["id"])
+                # A fresh journal cannot claim a pre-existing connection, even if someone copied its credentials.
+                if step is None:
+                    raise ProviderError("A Telnyx connection already uses this setup name. Choose a different line name; "
+                                        "the existing connection was not changed or adopted.")
+                existing = self._connection(existing, body)
+
+        allowed = sorted({"US", "CA", (number.country or _country_of(number.e164)).upper()} - {""})
+        st, data = journal.start("profile", name=name, recovery_tag=f"ai-phone-{uuid4().hex}")
+        if st != "done":
+            profile = self._find("/outbound_voice_profiles", "name", name)
+            tag = data.get("recovery_tag")
+            if not profile and tag and (not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", tag)):
+                # Older setup emitted a colon, which Telnyx rejects in tags. Only repair that known format
+                # after both paginated searches found no resource and nothing beyond this step was attempted.
+                profile_step = journal._step("profile")
+                if (not isinstance(tag, str) or not re.fullmatch(r"ai-phone:[0-9a-f]{32}", tag)
+                        or step is not None or existing is not None or profile_id
+                        or profile_step is not journal.doc["steps"][-1] or profile_step["result"]):
+                    raise ProviderError("This unfinished Telnyx profile has an invalid recovery tag and cannot be "
+                                        "safely retried automatically. Review its carrier resources before continuing.")
+                replacement = tag.replace(":", "-", 1)
+                profile_step["planned"]["recovery_tag"] = replacement
+                try:
+                    journal._save()  # persist the new identity before any POST can reach the carrier
+                except BaseException:
+                    profile_step["planned"]["recovery_tag"] = tag
+                    raise
+                tag = replacement
+            profile_body = {"name": name, "traffic_type": "conversational", "whitelisted_destinations": allowed}
+            if tag:
+                profile_body["tags"] = [tag]
+            if profile:
+                # Legacy unfinished journals have no proof that this profile was created by their attempt.
+                if not tag or not self._matches(profile, profile_body):
+                    raise ProviderError("A Telnyx outbound voice profile uses this setup name but cannot be identified "
+                                        "as this setup's creation. Review it in the Telnyx portal; it was not adopted.")
+                journal.finish("profile", outbound_voice_profile_id=self._resource_id(profile))
             else:
                 try:
-                    # Telnyx's default whitelist is US+CA; a UK owner of a US number could not call home. Allow the
-                    # number's own country as well (a brought or resumed number arrives without one: derive it);
-                    # anything else is a portal/API change to the profile.
-                    allowed = sorted({"US", "CA", (number.country or _country_of(number.e164)).upper()} - {""})
-                    rec = self._call("POST", "/outbound_voice_profiles",
-                                     json={"name": name, "traffic_type": "conversational", "whitelisted_destinations": allowed})
-                    journal.finish("profile", outbound_voice_profile_id=rec["id"])
+                    rec = self._call("POST", "/outbound_voice_profiles", json=profile_body)
+                    journal.finish("profile", outbound_voice_profile_id=self._resource_id(rec))
                 except ProviderError as e:
-                    # Trial and freshly paid accounts may hold one profile only ("You may only have 1 Outbound Voice
-                    # Profile(s) at your account level"). Share the account's existing profile; `release` leaves it alone.
+                    # Trial and freshly paid accounts may hold one profile only. Share the account's existing
+                    # profile deliberately; release leaves it alone. A name collision is not this fallback.
                     if e.status != 403:
                         raise
                     shared = next(iter(self._call("GET", "/outbound_voice_profiles")), None)
                     if not shared:
                         raise ProviderError(f"{e}; and the account has no outbound voice profile to share") from None
-                    journal.finish("profile", outbound_voice_profile_id=shared["id"], profile_shared=True)
+                    journal.finish("profile", outbound_voice_profile_id=self._resource_id(shared), profile_shared=True)
         profile_id = journal.resources()["outbound_voice_profile_id"]
+        body["outbound"]["outbound_voice_profile_id"] = profile_id
 
         st, data = journal.start("connection", name=name, user_name=sip_user)
         if st != "done":
-            existing = self._find("/credential_connections", "connection_name", name) if st == "started" else None
-            body = {"connection_name": name, "user_name": sip_user, "password": sip_password, "active": True,
-                    "sip_uri_calling_preference": "disabled", "encode_contact_header_enabled": True,
-                    "inbound": {"channel_limit": 1, "sip_subdomain_receive_settings": "only_my_connections"},
-                    "outbound": {"outbound_voice_profile_id": profile_id, "channel_limit": 1}}
-            rec = existing or self._call("POST", "/credential_connections", json=body)
-            journal.finish("connection", connection_id=rec["id"])
-        connection_id = journal.resources()["connection_id"]
-        return connection_id
+            if existing is None:
+                try:
+                    existing = self._call("POST", "/credential_connections", json=body)
+                except ProviderError as e:
+                    if e.status != 422:
+                        raise
+                    # A duplicate response can follow a successful request whose response was lost. Never PATCH
+                    # its credentials: only a unique candidate matching the whole request may be reconciled.
+                    candidate = self._find("/credential_connections", "connection_name", name)
+                    if candidate is None:
+                        raise ProviderError("Telnyx rejected the SIP connection and no matching setup was found. "
+                                            "Review the connection in the Telnyx portal.") from None
+                    existing = self._connection(candidate, body)
+            self._connection(existing, body, read=False)
+            journal.finish("connection", connection_id=self._resource_id(existing))
+        else:
+            self._connection(existing, body, read=False)
+        return journal.resources()["connection_id"]
 
     def poll(self, journal: Journal) -> ProvisionResult:
         res = journal.resources()
