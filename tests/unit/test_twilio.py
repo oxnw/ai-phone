@@ -1,3 +1,4 @@
+import copy
 import json
 import urllib.parse
 from pathlib import Path
@@ -10,6 +11,29 @@ from ai_phone.providers.base import ProviderError
 from ai_phone.providers.twilio import SIGNALLING_CIDRS, TwilioProvider
 
 SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+CONTRACT = json.loads((Path(__file__).parents[1] / "fixtures/twilio/provisioning.json").read_text())
+
+
+def _response(kind: str, sid: str, **values) -> dict:
+    record = copy.deepcopy(CONTRACT["response_templates"][kind])
+    assert values.keys() <= record.keys(), "test response fields must come from the documented contract"
+    record.update(account_sid=SID, sid=sid, **values)
+    return record
+
+
+def _page(request: httpx.Request, key: str, records: list[dict]) -> dict:
+    dialect = "trunking" if request.url.host == "trunking.twilio.com" else "classic"
+    page = copy.deepcopy(CONTRACT["pagination_templates"][dialect])
+    if dialect == "trunking":
+        page["meta"].update(url=str(request.url), first_page_url=str(request.url), key=key)
+    else:
+        page.update(uri=request.url.raw_path.decode(), first_page_uri=request.url.raw_path.decode())
+    page[key] = records
+    return page
+
+
+def _accept(kind: str, form: dict) -> None:
+    assert form.keys() <= set(CONTRACT["request_fields"][kind]), "unsupported Twilio request field"
 
 
 class Carrier:
@@ -18,6 +42,18 @@ class Carrier:
         self.calls = []
         self.updates = []  # (number sid, form) of every POST that changes an existing number
         self.trial = trial  # trial accounts get no Elastic SIP Trunking
+
+    @staticmethod
+    def domain_response(sid, form):
+        return _response("domain", sid, domain_name=form["DomainName"], friendly_name=form.get("FriendlyName"),
+                         sip_registration=form.get("SipRegistration") == "true", voice_method=form.get("VoiceMethod", "POST"))
+
+    @staticmethod
+    def number_response(sid, form):
+        return _response("number", sid, phone_number=form["PhoneNumber"], friendly_name=form.get("FriendlyName"),
+                         voice_url=form.get("VoiceUrl"), voice_method=form.get("VoiceMethod", "POST"),
+                         trunk_sid=form.get("TrunkSid"), voice_application_sid=form.get("VoiceApplicationSid"),
+                         capabilities=form.get("Capabilities", {"voice": True, "sms": True}))
 
     def __call__(self, req: httpx.Request) -> httpx.Response:
         self.calls.append((req.method, req.url.host, req.url.path))
@@ -29,49 +65,66 @@ class Carrier:
         if m == "GET" and p.endswith("/AvailablePhoneNumbers/GB/Local.json"):
             return httpx.Response(200, json={"available_phone_numbers": [{"phone_number": "+442079460000"}]})
         if m == "POST" and p.endswith("/SIP/CredentialLists.json"):
-            sid = f"CL{len(self.credlists) + 1}"; self.credlists[sid] = form; return httpx.Response(201, json={"sid": sid, **form})
+            _accept("credential_list", form)
+            sid = f"CL{len(self.credlists) + 1}"
+            self.credlists[sid] = form
+            return httpx.Response(201, json=_response("credential_list", sid, friendly_name=form["FriendlyName"]))
         if m == "GET" and p.endswith("/SIP/CredentialLists.json"):
-            return httpx.Response(200, json={"credential_lists": [{"sid": k, "friendly_name": v["FriendlyName"]} for k, v in self.credlists.items()]})
+            return httpx.Response(200, json=_page(req, "credential_lists", [_response("credential_list", k, friendly_name=v["FriendlyName"]) for k, v in self.credlists.items()]))
         if m == "POST" and "/Credentials.json" in p:
-            sid = f"CR{len(self.creds) + 1}"; self.creds[sid] = form; return httpx.Response(201, json={"sid": sid})
+            _accept("credential", form)
+            sid = f"CR{len(self.creds) + 1}"
+            self.creds[sid] = {**form, "CredentialListSid": p.split("/")[-2]}
+            return httpx.Response(201, json=_response("credential", sid, username=form["Username"], credential_list_sid=p.split("/")[-2]))
         if m == "GET" and "/Credentials.json" in p:
-            return httpx.Response(200, json={"credentials": [{"sid": k, "username": v["Username"]} for k, v in self.creds.items()]})
+            return httpx.Response(200, json=_page(req, "credentials", [_response("credential", k, username=v["Username"], credential_list_sid=v["CredentialListSid"]) for k, v in self.creds.items() if v["CredentialListSid"] == p.split("/")[-2]]))
         if m == "POST" and p.endswith("/SIP/Domains.json"):
-            sid = f"SD{len(self.domains) + 1}"; self.domains[sid] = form; return httpx.Response(201, json={"sid": sid, **form})
+            _accept("domain", form)
+            sid = f"SD{len(self.domains) + 1}"
+            self.domains[sid] = form
+            return httpx.Response(201, json=self.domain_response(sid, form))
         if m == "GET" and p.endswith("/SIP/Domains.json"):
-            return httpx.Response(200, json={"domains": [{"sid": k, "domain_name": v["DomainName"], "friendly_name": v.get("FriendlyName")} for k, v in self.domains.items()]})
+            return httpx.Response(200, json=_page(req, "domains", [self.domain_response(k, v) for k, v in self.domains.items()]))
         if m == "POST" and "/Auth/Registrations/CredentialListMappings.json" in p:
-            self.mappings[p.split("/")[6]] = form["CredentialListSid"]; return httpx.Response(201, json={"sid": "ML1"})
+            _accept("domain_mapping", form)
+            self.mappings[p.split("/")[6]] = form["CredentialListSid"]
+            return httpx.Response(201, json=_response("domain_mapping", form["CredentialListSid"]))
         if m == "GET" and "/Auth/Registrations/CredentialListMappings.json" in p:
             dsid = p.split("/")[6]
-            return httpx.Response(200, json={"contents": [{"sid": self.mappings[dsid]}] if dsid in self.mappings else []})
+            return httpx.Response(200, json=_page(req, "contents", [_response("domain_mapping", self.mappings[dsid])] if dsid in self.mappings else []))
         if m == "POST" and p.endswith("/IncomingPhoneNumbers.json"):
-            sid = f"PN{len(self.numbers) + 1}"; self.numbers[sid] = form; return httpx.Response(201, json={"sid": sid, **form})
+            _accept("number", form)
+            sid = f"PN{len(self.numbers) + 1}"
+            self.numbers[sid] = form
+            return httpx.Response(201, json=self.number_response(sid, form))
         if m == "GET" and p.endswith("/IncomingPhoneNumbers.json"):
             want = req.url.params.get("PhoneNumber")  # no filter: every number on the account
-            return httpx.Response(200, json={"incoming_phone_numbers": [
-                {"sid": k, "phone_number": v["PhoneNumber"], "voice_url": v.get("VoiceUrl"), "voice_method": v.get("VoiceMethod"),
-                 "trunk_sid": v.get("TrunkSid"), "voice_application_sid": v.get("VoiceApplicationSid"),
-                 "capabilities": v.get("Capabilities", {"voice": True, "sms": True})}
-                for k, v in self.numbers.items() if want is None or v["PhoneNumber"] == want]})
+            return httpx.Response(200, json=_page(req, "incoming_phone_numbers", [self.number_response(k, v)
+                for k, v in self.numbers.items() if want is None or v["PhoneNumber"] == want]))
         if m == "POST" and "/IncomingPhoneNumbers/" in p:
             sid = p.rsplit("/", 1)[1].removesuffix(".json")
             if sid not in self.numbers:
                 return httpx.Response(404, json={"message": f"no number {sid}"})
+            _accept("number", form)
             self.updates.append((sid, form))
             self.numbers[sid].update(form)
-            return httpx.Response(200, json={"sid": sid, **self.numbers[sid]})
+            return httpx.Response(200, json=self.number_response(sid, self.numbers[sid]))
         if host == "trunking.twilio.com" and m == "POST" and p == "/v1/Trunks":
             if self.trial:
                 return httpx.Response(403, json={"code": 20003, "message": "SIP trunking is only available after you upgrade your account"})
-            sid = f"TK{len(self.trunks) + 1}"; self.trunks[sid] = form; return httpx.Response(201, json={"sid": sid, **form})
+            _accept("trunk", form)
+            sid = f"TK{len(self.trunks) + 1}"
+            self.trunks[sid] = form
+            return httpx.Response(201, json=_response("trunk", sid, friendly_name=form["FriendlyName"], domain_name=form["DomainName"]))
         if host == "trunking.twilio.com" and m == "GET" and p == "/v1/Trunks":
-            return httpx.Response(200, json={"trunks": [{"sid": k, "friendly_name": v["FriendlyName"], "domain_name": v["DomainName"]} for k, v in self.trunks.items()]})
+            return httpx.Response(200, json=_page(req, "trunks", [_response("trunk", k, friendly_name=v["FriendlyName"], domain_name=v["DomainName"]) for k, v in self.trunks.items()]))
         if host == "trunking.twilio.com" and m == "POST" and p.endswith("/CredentialLists"):
-            self.trunk_cls[p.split("/")[3]] = form["CredentialListSid"]; return httpx.Response(201, json={"sid": form["CredentialListSid"]})
+            _accept("trunk_mapping", form)
+            self.trunk_cls[p.split("/")[3]] = form["CredentialListSid"]
+            return httpx.Response(201, json=_response("trunk_mapping", form["CredentialListSid"], trunk_sid=p.split("/")[3]))
         if host == "trunking.twilio.com" and m == "GET" and p.endswith("/CredentialLists"):
             tsid = p.split("/")[3]
-            return httpx.Response(200, json={"credential_lists": [{"sid": self.trunk_cls[tsid]}] if tsid in self.trunk_cls else []})
+            return httpx.Response(200, json=_page(req, "credential_lists", [_response("trunk_mapping", self.trunk_cls[tsid], trunk_sid=tsid)] if tsid in self.trunk_cls else []))
         if m == "DELETE":
             for store in (self.numbers, self.domains, self.credlists, self.trunks):
                 store.pop(p.rstrip(".json").rsplit("/", 1)[1], None)
@@ -145,12 +198,24 @@ MUTATING = 7  # credential list, credential, domain, mapping, number, trunk, tru
 
 
 @pytest.mark.parametrize("crash_at", list(range(1, MUTATING + 1)))
-def test_a_lost_response_after_any_step_is_reconciled_without_duplicates(tmp_path: Path, crash_at: int):
+@pytest.mark.parametrize("later_page", [False, True])
+def test_a_lost_response_after_any_step_is_reconciled_without_duplicates(tmp_path: Path, crash_at: int, later_page: bool):
     c = Carrier()
     posts = {"n": 0, "armed": True}
 
     def handler(req):
         r = c(req)  # the carrier always processes the request; we lose the response on the crash_at-th mutation
+        if later_page and req.method == "GET":
+            body = r.json()
+            key = next((k for k in ("credentials", "credential_lists", "domains", "contents", "incoming_phone_numbers", "trunks") if k in body), None)
+            if key and not req.url.params.get("PageToken"):
+                body[key] = []  # the resource exists, but only on the second page
+                next_url = req.url.copy_add_param("PageToken", "second")
+                if req.url.host == "trunking.twilio.com":
+                    body["meta"]["next_page_url"] = str(next_url)
+                else:
+                    body["next_page_uri"] = next_url.raw_path.decode()
+                r = httpx.Response(200, json=body)
         if req.method == "POST" and posts["armed"]:
             posts["n"] += 1
             if posts["n"] == crash_at:
@@ -447,3 +512,171 @@ def test_a_bring_then_a_buy_in_one_journal_restores_the_brought_number(tmp_path:
     assert list(c.numbers) == ["PN9"], "the bought number is released"
     assert c.updates == [("PN9", {"VoiceUrl": "https://example.com/old", "VoiceMethod": "POST"})]
     assert c.numbers["PN9"]["VoiceUrl"] == "https://example.com/old" and not c.domains
+
+
+# ---- documented response contracts and paginated recovery --------------------------------------
+
+def test_setup_uses_response_fields_without_requiring_request_echo(tmp_path):
+    carrier = Carrier()
+    responses = []
+
+    def handler(request):
+        response = carrier(request)
+        if request.method == "POST":
+            responses.append((request.url.path, response.json()))
+        return response
+
+    provider = _provider(handler)
+    number = provider.search_numbers("GB", None, 1)[0]
+    result = provider.provision(Journal.open(tmp_path, "main", "twilio"), number, "main", "aimain1234", "Passw0rdPassw0rdPassw0rd")
+    assert result.state == "ready"
+    credential = next(body for path, body in responses if path.endswith("/Credentials.json"))
+    assert credential["username"] == "aimain1234"
+    assert "password" not in credential and "Password" not in credential
+    domain = next(body for path, body in responses if path.endswith("/SIP/Domains.json"))
+    assert domain["sip_registration"] is True and domain["voice_url"] is None
+    assert all(not any(key[:1].isupper() for key in body) for _, body in responses)
+
+
+def test_owned_number_listing_reads_all_pages():
+    first = _response("number", "PN1", phone_number="+15550100001")
+    second = _response("number", "PN2", phone_number="+15550100002")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        page = _page(request, "incoming_phone_numbers", [second if request.url.params.get("PageToken") else first])
+        if len(requests) == 1:
+            page["next_page_uri"] = request.url.copy_add_param("PageToken", "second").raw_path.decode()
+        return httpx.Response(200, json=page)
+
+    numbers = _provider(handler).owned_numbers()
+    assert [number.e164 for number in numbers] == ["+15550100001", "+15550100002"]
+    assert len(requests) == 2 and all(request.method == "GET" for request in requests)
+
+
+@pytest.mark.parametrize("following", [
+    "https://example.com/steal", "http://api.twilio.com/2010-04-01/Accounts/ignored",
+    "https://api.twilio.com/2010-04-01/Accounts/another/IncomingPhoneNumbers.json",
+    "https://api.twilio.com/2010-04-01/Accounts/ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/SIP/Domains.json",
+    "https://someone@api.twilio.com/2010-04-01/Accounts/ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/IncomingPhoneNumbers.json",
+    "?Page=1#fragment", "https://[invalid", 42,
+])
+def test_pagination_never_sends_auth_to_another_destination(following):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"incoming_phone_numbers": [], "next_page_uri": following})
+
+    with pytest.raises(ProviderError, match="pagination link"):
+        _provider(handler).owned_numbers()
+    assert len(requests) == 1
+
+
+def test_paginated_lookup_rejects_redirects_even_with_redirecting_client():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "https://example.com/steal"})
+
+    provider = TwilioProvider(key=SID, secret="tok", http=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True))
+    with pytest.raises(ProviderError) as error:
+        provider.owned_numbers()
+    assert error.value.status == 302 and len(requests) == 1
+
+
+def test_repeated_pagination_link_stops_without_creating_resources(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"credential_lists": [], "next_page_uri": request.url.raw_path.decode()})
+
+    journal = Journal.open(tmp_path, "main", "twilio")
+    journal.start("credential_list", name="ai-phone:main")
+    with pytest.raises(ProviderError, match="repeated a pagination link"):
+        _provider(handler)._sip_domain(journal, "main", "aimain1234", "Passw0rdPassw0rdPassw0rd")
+    assert len(requests) == 1 and requests[0].method == "GET"
+
+
+def test_matching_resource_names_on_different_pages_are_ambiguous(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        body = _page(request, "credential_lists", [_response("credential_list", f"CL{len(requests)}", friendly_name="ai-phone:main")])
+        if len(requests) == 1:
+            body["next_page_uri"] = request.url.copy_add_param("PageToken", "second").raw_path.decode()
+        return httpx.Response(200, json=body)
+
+    journal = Journal.open(tmp_path, "main", "twilio")
+    journal.start("credential_list", name="ai-phone:main")
+    with pytest.raises(ProviderError, match="multiple matching resources"):
+        _provider(handler)._sip_domain(journal, "main", "aimain1234", "Passw0rdPassw0rdPassw0rd")
+    assert len(requests) == 2 and all(request.method == "GET" for request in requests)
+
+
+@pytest.mark.parametrize("body", [[], {}, {"incoming_phone_numbers": None}, {"incoming_phone_numbers": [None]},
+                                  {"incoming_phone_numbers": [], "meta": []}])
+def test_malformed_list_is_not_treated_as_an_empty_account(body):
+    with pytest.raises(ProviderError, match="invalid"):
+        _provider(lambda request: httpx.Response(200, json=body)).owned_numbers()
+
+
+
+@pytest.mark.parametrize("step, pagination", [
+    pytest.param("credential_list", {}, id="classic-missing-marker"),
+    pytest.param("credential_list", {"next_page_uri": ""}, id="classic-empty-marker"),
+    pytest.param("credential_list", {"meta": {"next_page_url": None}}, id="classic-wrong-dialect"),
+    pytest.param("credential_list", {"next_page_uri": "?PageToken=second", "meta": {}}, id="classic-mixed-empty-meta"),
+    pytest.param("credential_list", {"next_page_uri": None, "meta": {"next_page_url": "?PageToken=second"}}, id="classic-mixed-next"),
+    pytest.param("trunk", {}, id="trunking-missing-meta"),
+    pytest.param("trunk", {"meta": {}}, id="trunking-missing-marker"),
+    pytest.param("trunk", {"meta": {"next_page_url": ""}}, id="trunking-empty-marker"),
+    pytest.param("trunk", {"next_page_uri": None}, id="trunking-wrong-dialect"),
+    pytest.param("trunk", {"meta": {"next_page_url": "?PageToken=second"}, "next_page_uri": None}, id="trunking-mixed-next"),
+    pytest.param("trunk", {"meta": {"next_page_url": None}, "next_page_uri": "?PageToken=second"}, id="trunking-mixed-terminal"),
+])
+def test_incomplete_pagination_cannot_create_or_complete_a_resumed_step(tmp_path, step, pagination):
+    carrier = Carrier()
+    requests = []
+    key = "credential_lists" if step == "credential_list" else "trunks"
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={key: [], **pagination})
+        return carrier(request)
+
+    journal = Journal.open(tmp_path, "main", "twilio")
+    if step == "trunk":
+        journal.start("credential_list", name="ai-phone:main")
+        journal.finish("credential_list", credential_list_sid="CL1")
+    journal.start(step, name="ai-phone:main")
+    before = copy.deepcopy(journal.doc)
+    provider = _provider(handler)
+    with pytest.raises(ProviderError, match="pagination"):
+        if step == "credential_list":
+            provider._sip_domain(journal, "main", "aimain1234", "Passw0rdPassw0rdPassw0rd")
+        else:
+            provider._trunk(journal, "main", "+15550100001")
+    assert len(requests) == 1 and requests[0].method == "GET"
+    assert carrier.calls == [], "no mutating request may reach the carrier"
+    assert journal.doc == before and json.loads(journal.path.read_text()) == before
+
+
+def test_pagination_has_a_finite_page_limit_before_retry_can_create_anything(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        following = request.url.copy_set_param("PageToken", str(len(requests)))
+        return httpx.Response(200, json={"credential_lists": [], "next_page_uri": following.raw_path.decode()})
+
+    journal = Journal.open(tmp_path, "main", "twilio")
+    journal.start("credential_list", name="ai-phone:main")
+    with pytest.raises(ProviderError, match="page limit"):
+        _provider(handler)._sip_domain(journal, "main", "aimain1234", "Passw0rdPassw0rdPassw0rd")
+    assert len(requests) == 100 and all(request.method == "GET" for request in requests)
