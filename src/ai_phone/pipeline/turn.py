@@ -97,7 +97,7 @@ class TurnController:
         self._fillers_armed = False
         self._fillers_played = 0
         self._held_end: tuple[int, int] | None = None   # relay: (t0, t0_end) of speech that ended while transcribing
-        self._opening_pending = False                   # the model's opening sentence is in flight
+        self._opening_pending = False                   # the model's opening reply is in flight
         self._held: list[bytes] = []                    # its audio, held until the disclosure has played
         self._closed = False                            # run() has returned
 
@@ -249,7 +249,7 @@ class TurnController:
         self.state = "ENDING_DRAIN"
         self._drain_deadline_ns = now + int(5e9)
 
-    # ---- the model's opening sentence (phone agent mode, outbound) ------------------------------------
+    # ---- the model's opening reply (phone agent mode, outbound) ------------------------------------
     def _start_opening(self) -> None:
         self.history.append({"role": "user", "content": OPENING_CUE})
         t = self.timer = self._timer()
@@ -422,7 +422,7 @@ class TurnController:
             if held_end is not None:
                 self._finalize_replayed(held_end[0], now)
             return
-        if self._opening_pending:  # the model's first sentence follows the disclosure without a gap
+        if self._opening_pending:  # the model's opening reply follows the completed disclosure
             self.port.arm_t5()
             had_audio = bool(self._held)
             self._queue_cached(self._held)

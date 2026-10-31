@@ -681,7 +681,7 @@ class Daemon:
                 self._bg_tasks.add(task)
                 task.add_done_callback(self._bg_tasks.discard)
 
-        # an outbound call without --prompt falls back to prompts.DEFAULT_CALL_SECTION (calling on the owner's behalf);
+        # an outbound call without a task uses prompts.DEFAULT_CALL_SECTION (an honest no-purpose conversation);
         # an incoming call never does: blank inbound instructions mean the take-a-message default
         section = rec.prompt if out else (self.cfg.inbound.instructions.strip() or InboundConfig().instructions)
         system = prompts.system_prompt(ctx["fixed"], section)
