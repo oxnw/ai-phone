@@ -31,6 +31,8 @@ import yaml
 
 import ai_phone
 from ai_phone import models, paths, voices
+from ai_phone.carriers import CARRIERS, CARRIER_KEYS, managed_caller_id, provider_kwargs
+from ai_phone.lines.caller_id import apply_caller_id, caller_id_journal, caller_id_line
 from ai_phone.cli_lines import journal_setups, manual_line, next_line_id, provision_flow, write_line
 from ai_phone.config import E164_RE, SUBSCRIPTION_MODELS, Config, ConfigError, line_password_env, load_config
 from ai_phone.control.client import probe
@@ -43,7 +45,6 @@ from ai_phone.services.errors import BrainError
 from ai_phone.telephony.state import StateError, StateFile
 
 log = logging.getLogger("ai-phone.setup")
-CARRIER_KEYS = {"twilio": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"), "telnyx": ("TELNYX_API_KEY",), "fake": ("FAKE_API_KEY",)}
 BRAIN_KEY_ENV = "AI_PHONE_BRAIN_API_KEY"  # a secret name by the daemon's rules (it contains KEY), so workers never inherit it
 VENDOR = Path(ai_phone.__file__).parent / "vendor"  # where install.sh puts the PJSIP binding
 DAEMON = [sys.executable, "-c", "import sys; from ai_phone.cli import main; sys.exit(main(sys.argv[1:]))", "run", "--fake"]
@@ -403,9 +404,10 @@ class Actions:
         loader = self.provider_loader
         if loader is None:
             from ai_phone.providers import load_provider as loader
-        names = CARRIER_KEYS[carrier]
         try:
-            return loader(carrier, key=creds[names[0]], secret=creds.get(names[1]) if len(names) > 1 else None)
+            return loader(carrier, **provider_kwargs(carrier, creds))
+        except KeyError:
+            raise ActionError(f"Enter all {CARRIERS[carrier].label} credential fields.") from None
         except ProviderError as e:
             raise ActionError(redact(f"That key did not work: {e}", creds.values())) from None
 
@@ -435,6 +437,18 @@ class Actions:
         except ActionError:
             lines = {}
         return {j.number for line_id, j in journal_setups().items() if line_id not in lines and j.number not in (None, "?")}
+
+    def resumable_numbers(self, carrier: str) -> dict[str, str]:
+        """SignalWire existing-number attempts that setup can safely offer to finish, by number."""
+        if carrier != "signalwire":
+            return {}
+        lines = _section(self._read(), "lines")
+        connected = {ln.get("number") for ln in lines.values() if isinstance(ln, dict)}
+        journals = journal_setups()
+        return {j.number: line_id for line_id, j in journals.items()
+                if line_id not in lines and j.number not in connected and j.number not in (None, "?")
+                and j.provider == carrier and j.brought and j.resumable and j.state == "pending"
+                and sum(other.number == j.number for other in journals.values()) == 1}
 
     def _line_id(self, raw: dict, carrier: str, number, existing: bool) -> str:
         """The id for setting up `number`. An earlier attempt at this number (a journal with no line, under any id) is
@@ -484,6 +498,8 @@ class Actions:
         return LineResult(line_id, code, [redact(m, creds.values()) for m in messages])
 
     def buy_number(self, carrier: str, creds: dict[str, str], number) -> LineResult:
+        if not CARRIERS[carrier].purchase:
+            raise ActionError(f"Buy a number in your {CARRIERS[carrier].label} Space, then connect it as an existing number.")
         return self._connect(carrier, creds, number, existing=False)
 
     def attach_number(self, carrier: str, creds: dict[str, str], number) -> LineResult:
@@ -503,13 +519,23 @@ class Actions:
             self._edit(change)
         return codes
 
-    def start_caller_id(self, carrier: str, creds: dict[str, str], number: str):
+    def start_caller_id(self, carrier: str, creds: dict[str, str], number: str, *, line_id: str | None = None):
         """Ask the carrier to prove the person owns `number`. The step says how they finish it."""
         from ai_phone.providers.base import ProviderError
         try:
-            return self._provider(carrier, creds).start_caller_id_verification(number)
+            provider = self._provider(carrier, creds)
+            if CARRIERS[carrier].managed_caller_id:
+                if not line_id:
+                    raise ActionError("Select a line before verifying its caller ID.")
+                line = caller_id_line(self.config_path, line_id)
+                if (line.get("provider") or {}).get("name") != carrier:
+                    raise ActionError("The selected line belongs to another carrier.")
+                provider.validate_context(caller_id_journal(line_id, line))
+            return provider.start_caller_id_verification(number)
         except ProviderError as e:
             raise self._carrier_error(carrier, creds, e, "Could not start the check") from None
+        except (ValueError, OSError, RuntimeError) as e:
+            raise ActionError(redact(str(e), creds.values())) from None
 
     def check_caller_id(self, carrier: str, creds: dict[str, str], step, code: str | None) -> bool:
         """Whether the carrier has accepted it yet: with the code they texted, or None while the call is waiting."""
@@ -519,14 +545,22 @@ class Actions:
         except ProviderError as e:
             raise self._carrier_error(carrier, creds, e, "Could not check the code") from None
 
-    def record_caller_id(self, line_id: str, number: str, carrier: str) -> None:
+    def record_caller_id(self, line_id: str, number: str, carrier: str, creds: dict[str, str] | None = None) -> None:
         """The carrier accepted it: remember the verified number and call out as it, which is the point of the step
-        (`ai-phone lines verify-caller-id` only records it, and says to set caller_id by hand)."""
+        (`ai-phone lines verify-caller-id` only records it for carriers using the phone number in From)."""
+        line = _section(self._read(), "lines").get(line_id) or {}
+        if managed_caller_id(line):
+            if (line.get("provider") or {}).get("name") != carrier:
+                raise ActionError("The selected line belongs to another carrier.")
+            self._apply_carrier_caller_id(line_id, number, carrier, creds, verified=True)
+            return
         def change(raw: dict) -> None:
             lines = raw.get("lines")
             ln = lines.get(line_id) if isinstance(lines, dict) else None  # the line itself, to change in place
             if not isinstance(ln, dict):
                 raise ActionError(f"no line {line_id} to verify a number for")
+            if ln.get("from_user", "number") == "account":
+                raise ActionError(f"line {line_id} uses its SIP account in From; configure the caller ID with your provider")
             verified = [v for v in (ln.get("verified_caller_ids") or []) if v.get("number") != number]
             verified.append({"number": number, "provider": carrier,
                              "verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
@@ -534,8 +568,12 @@ class Actions:
             ln["caller_id"] = number
         self._edit(change)
 
-    def use_caller_id(self, line_id: str, number: str) -> None:
-        """Select the line's own number or an ID already verified for its carrier, without contacting it."""
+    def use_caller_id(self, line_id: str, number: str, creds: dict[str, str] | None = None) -> None:
+        """Select an eligible caller ID, applying it at the carrier when that endpoint controls it."""
+        line = _section(self._read(), "lines").get(line_id) or {}
+        if managed_caller_id(line):
+            self._apply_carrier_caller_id(line_id, number, line["provider"]["name"], creds)
+            return
         def change(raw: dict) -> None:
             lines = raw.get("lines")
             ln = lines.get(line_id) if isinstance(lines, dict) else None
@@ -543,6 +581,8 @@ class Actions:
                 raise ActionError(f"no line {line_id}; add a phone line before choosing its caller ID")
             if ln.get("kind", "trunk") != "trunk":
                 raise ActionError(f"line {line_id} uses a SIP address; choose a phone line to change its caller ID")
+            if ln.get("from_user", "number") == "account":
+                raise ActionError(f"line {line_id} uses its SIP account in From; configure the caller ID with your provider")
             provider = ln.get("provider")
             if provider is not None and (not isinstance(provider, dict) or provider.get("state", "pending") != "ready"):
                 raise ActionError(f"line {line_id} is not ready; finish its setup before choosing its caller ID")
@@ -558,6 +598,18 @@ class Actions:
                 raise ActionError(f"{number} is not verified for line {line_id}; verify it first or choose the line's own number")
             ln["caller_id"] = number
         self._edit(change)
+
+    def _apply_carrier_caller_id(self, line_id: str, number: str, carrier: str,
+                                 creds: dict[str, str] | None, *, verified: bool = False) -> None:
+        if not creds:
+            raise ActionError(f"Enter the {CARRIERS[carrier].label} credentials for this line to change its caller ID.")
+        try:
+            provider = self._provider(carrier, creds)
+            apply_caller_id(self.config_path, line_id, number, provider=provider, verified=verified)
+        except (RuntimeError, ValueError, OSError) as e:
+            raise ActionError(redact(f"{e}\nIf the carrier change was applied, finish saving it with: "
+                                     f"ai-phone lines resume {line_id} --key-env SIGNALWIRE_PROJECT_ID "
+                                     "--secret-env SIGNALWIRE_API_TOKEN --space <space-host>", creds.values())) from None
 
     # ---- lines by hand ---------------------------------------------------------------------------
 
@@ -592,14 +644,21 @@ class Actions:
                 raise ActionError(str(e)) from None
         return line_id
 
-    def add_trunk_line(self, registrar: str, user: str, password: str, number: str, transport: str) -> str:
+    def add_trunk_line(self, registrar: str, user: str, password: str, number: str, transport: str,
+                       from_user: str = "number", *, preset: str | None = None, srtp: str = "off") -> str:
+        if preset not in (None, "signalwire"):
+            raise ActionError("Unknown SIP trunk preset.")
+        if preset == "signalwire":
+            from_user = "account"
         with line_lock(paths.lines_dir()):
-            line_id = next_line_id(self._read(), "trunk")
+            line_id = next_line_id(self._read(), preset or "trunk")
             env = line_password_env(line_id)
             try:
                 write_secret(env, password)
-                write_line(self.config_path, line_id, manual_line("trunk", number=number, registrar=registrar, user=user,
-                                                                  password_env=env, transport=transport))
+                write_line(self.config_path, line_id, manual_line("trunk", number=number or None, registrar=registrar, user=user,
+                                                                  password_env=env, transport=transport, from_user=from_user,
+                                                                  outbound_proxy=registrar if preset else None, srtp=srtp,
+                                                                  tls_hostname_policy="verified_wildcard" if preset == "signalwire" and transport == "tls" else "strict"))
             except (ValueError, SecretsError) as e:
                 try:
                     remove_secret(env)

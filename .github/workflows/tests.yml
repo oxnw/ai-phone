@@ -62,7 +62,7 @@ jobs:
         run: |
           command -v pjsua
           uv run python -c 'import ai_phone.vendor.pjsua2'
-      - name: Run calls with fake models
+      - name: Run local SIP and TLS checks
         timeout-minutes: 10
         env:
           HF_HUB_OFFLINE: "1"
@@ -74,5 +74,8 @@ jobs:
           tests/integration/test_echo_call.py
           tests/integration/test_daemon_smoke.py
           tests/integration/test_incoming_cancel.py
+          tests/integration/test_trunk_identity.py
           tests/integration/test_call_ending.py
+          tests/integration/test_tls_verification.py
+          tests/integration/test_tls_endpoint.py
           -q

@@ -24,6 +24,11 @@ lines:
     accept_invites_from: registered_trunk       # registered_trunk | trusted | lan | any
     trusted_cidrs: []                           # the carrier's signalling ranges; written by the provider
     caller_id: "+442079460000"
+    from_user: number                         # number (default) | account; account uses the SIP username in From
+                                              # SignalWire uses account and its endpoint send_as for the displayed number
+    tls_hostname_policy: strict             # strict (default) | verified_wildcard
+                                            # verified_wildcard requires a TLS trunk, register_via_proxy: true and
+                                            # outbound_proxy: "sip:DNS-host[:port];transport=tls". See docs/signalwire.md.
   agents:                                 # a SIP address with no carrier (agents calling agents)
     kind: sip
     user: agents
