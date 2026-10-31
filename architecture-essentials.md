@@ -37,7 +37,7 @@ L1 knows nothing about models. L3 knows nothing about SIP. L2 owns the conversat
 
 ## One turn, in order
 
-caller audio → `rx_ring` → VAD (Silero, 32 ms chunks) → **speech_end after 300 ms silence (t0)** → STT final (100 ms) → LLM streams tokens (prompt cache hit; 250 ms to first clause, zero slack) → clause chunker (punctuation, or 12 tokens) → TTS first chunk (150 ms) → 24→16 kHz → `tx_ring` → RTP (**t5**). Barge-in: ≥ 250 ms of caller speech above a playback-raised energy floor → cancel, flush, next turn; stop ≤ 300 ms from onset.
+caller audio → `rx_ring` → VAD (Silero, 32 ms chunks) → **speech_end after 300 ms silence (t0)** → STT final (100 ms) → LLM streams tokens (prompt cache hit; 250 ms to first clause, zero slack) → clause chunker (natural text boundaries; 16/24 complete-word fallback) → TTS first chunk (150 ms) → 24→16 kHz → `tx_ring` → RTP (**t5**). Barge-in: ≥ 250 ms of caller speech above a playback-raised energy floor → cancel, flush, next turn; stop ≤ 300 ms from onset.
 
 ## The stack (decided)
 
