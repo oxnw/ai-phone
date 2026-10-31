@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import ai_phone
 from ai_phone import models
 from ai_phone.config import SUBSCRIPTION_MODELS, InboundConfig
 from ai_phone.lines.forward import divert_codes
@@ -360,7 +359,7 @@ def test_new_setup_local_brain_sip_line_default_voice():
     check = ui.questions("Everything works")[0]
     assert check.checks == [Check("Models", "Parakeet 0.6B v2\nKokoro 82M\nQwen3.5 4B", True), Check("Config", "loads", True),
                             Check("Line agent", "ready · listening", True), Check("Voice", "Heart · played", True)]
-    assert "uv run ai-phone run" in outcome.summary
+    assert "ai-phone run" in outcome.summary
     assert "pjsua --local-port 5070 sip:agent@127.0.0.1" in outcome.summary
     assert ui.questions("You're set up")[0].body == outcome.summary
 
@@ -774,7 +773,7 @@ def test_three_wrong_codes_give_up_without_saving_anything():
     drive(ui, actions)
     assert len(actions.args("check_caller_id")) == 3 and not actions.args("record_caller_id")
     gave_up = ui.questions("Verification did not complete")[0]
-    assert "uv run ai-phone lines verify-caller-id telnyx +447700900123" in gave_up.detail
+    assert "ai-phone lines verify-caller-id telnyx +447700900123" in gave_up.detail
     assert ui.menu("Verification did not complete")[3] is False
 
 
@@ -792,7 +791,7 @@ def test_a_verification_the_config_will_not_record_is_never_silently_dropped():
     actions = FakeActions(exists=True, saved_keys={"TELNYX_API_KEY": "k"}, record_caller_id=ActionError(broken))
     outcome = drive(ui, actions)
     page = ui.questions("+447700900123 is verified, but not saved")[0]
-    assert page.detail == ("+447700900123 is verified with Telnyx; run: uv run ai-phone lines verify-caller-id "
+    assert page.detail == ("+447700900123 is verified with Telnyx; run: ai-phone lines verify-caller-id "
                            "telnyx +447700900123 --key-env <NAME> to record it.")
     assert page.error == broken
     assert ui.menu("+447700900123 is verified, but not saved")[3] is False
@@ -1657,7 +1656,7 @@ def test_a_cancel_after_a_purchase_names_the_number():
     actions = FakeActions(exists=True, buy_number=LineResult("twilio", 2, messages))
     outcome = drive(buy_then(("The number is not ready yet", "<quit>")), actions)
     assert outcome.summary == ("Setup cancelled. Saved in this run: line twilio (+15550100001, not finished: "
-                               "uv run ai-phone lines resume twilio, or uv run ai-phone lines remove twilio). "
+                               "ai-phone lines resume twilio, or ai-phone lines remove twilio). "
                                "Nothing else was changed.")
     ui = ScriptedUI([
         *add_a_line("Telnyx"),
@@ -1683,7 +1682,7 @@ def test_a_failed_purchase_keeps_its_line_id_for_the_summary():
     error.line_id = "twilio"
     outcome = drive(buy_then(("Something went wrong", "<quit>")), FakeActions(exists=True, buy_number=Seq(error)))
     assert outcome.summary == ("Setup cancelled. Saved in this run: line twilio (+15550100001, not finished: "
-                               "uv run ai-phone lines resume twilio, or uv run ai-phone lines remove twilio). "
+                               "ai-phone lines resume twilio, or ai-phone lines remove twilio). "
                                "Nothing else was changed.")
 
 
@@ -1694,8 +1693,8 @@ def test_ctrl_c_during_a_purchase_says_it_may_be_half_done():
     outcome = flow.run(ui, FakeActions(exists=True, save_brain_local=None, buy_number=Seq(KeyboardInterrupt())), session)
     assert outcome == Outcome(1, "\n".join([
         "Setup stopped during: Buying +15550100001 and connecting it…",
-        "That carrier step may be half done. See your lines with: uv run ai-phone lines list",
-        "then finish one with: uv run ai-phone lines resume <line>, or undo it with: uv run ai-phone lines remove <line>",
+        "That carrier step may be half done. See your lines with: ai-phone lines list",
+        "then finish one with: ai-phone lines resume <line>, or undo it with: ai-phone lines remove <line>",
     ]))
     assert ui.closed and not ui.answers and not session.left_download
     ui = ScriptedUI([
@@ -1765,7 +1764,7 @@ def test_leaving_on_the_done_page_still_finishes():
     ])
     actions = FakeActions(exists=True)
     outcome = drive(ui, actions)
-    assert outcome.code == 0 and "uv run ai-phone run" in outcome.summary
+    assert outcome.code == 0 and "ai-phone run" in outcome.summary
     assert actions.args("save_callers") == [(GREETING, INSTRUCTIONS, 0)]
     assert ui.questions("A few things")[0].checks[2] == Check("Lines", "none yet · run setup again to add one", None)
     assert not actions.args("check_lines")  # nothing to check, so nothing is started
@@ -2028,14 +2027,14 @@ def test_check_offers_the_download_and_reports():
     offer = ui.questions("Download the models now?")[0]
     assert offer.detail == "About 4.3 GB, saved in the Hugging Face cache. ai-phone needs them to handle calls."
     assert [(o.label, o.hint) for o in ui.menu("Download the models now?")[1]] == [
-        ("Download now", "4.3 GB"), ("Later", "run: uv run ai-phone models pull")]
+        ("Download now", "4.3 GB"), ("Later", "run: ai-phone models pull")]
     assert "Checking the download size…" in ui.labels
     downloading = ui.questions("Downloading the models")[0]
     assert downloading.detail == "You can leave this running. It picks up where it stopped if interrupted."
     assert all(callable(a[0]) for a in actions.args("pull_models")) and len(actions.args("pull_models")) == 2
     ok, later, failed_page = [p for p in ui.pages if p.step == CHECK and p.question in ("Everything works", "A few things need attention")]
     assert ok.checks[0] == Check("Models", "Parakeet 0.6B v2\nKokoro 82M\nQwen3.5 4B", True)
-    assert later.checks[0] == Check("Models", "not downloaded yet · uv run ai-phone models pull", None)
+    assert later.checks[0] == Check("Models", "not downloaded yet · ai-phone models pull", None)
     assert failed_page.checks[0] == Check("Models", failed, False)
     assert [(o.label) for o in ui.menu("Everything works")[1]] == ["Continue", "Check again"]
 
@@ -2099,8 +2098,6 @@ def test_done_text_fits_the_page(monkeypatch, tmp_path):
              "odd": {"kind": "trunk", "number": "+15550100004", "provider": "twilio"}}
     text = flow.done_text(FakeActions(exists=True, lines=lines), flow.Session())
     assert str(Path.home()) not in text
-    repo = Path(ai_phone.__file__).parents[2]
-    shown = "~/" + str(repo.relative_to(Path.home())) if repo.is_relative_to(Path.home()) else str(repo)
     assert text.splitlines() == [
         "Saved in ~/.ai-phone/   config.yaml and secrets.env (keys and passwords, private to you)",
         "",
@@ -2115,7 +2112,7 @@ def test_done_text_fits_the_page(monkeypatch, tmp_path):
         "Voice    Kokoro · Heart · American · female · 1.0×",
         "",
         "Start ai-phone",
-        "  uv run ai-phone run",
+        "  ai-phone run",
         "  Leave ai-phone running while you want to receive calls.",
         "  If already running, stop and restart to apply these settings.",
         "",
@@ -2123,11 +2120,11 @@ def test_done_text_fits_the_page(monkeypatch, tmp_path):
         "  call +15550100001 from any phone (your normal call rates)",
         "  pjsua --local-port 5070 sip:agent@127.0.0.1   talk through this computer's mic, free",
         "",
-        f"Give your AI the phone: from {shown}, it can run",
-        '  uv run ai-phone call +15550100000 --prompt "…" --json   ai-phone\'s agent talks',
-        "  uv run ai-phone call +15550100000 --relay --json        your AI talks (say, listen)",
-        "  uv run ai-phone listen --json                           wait for a call",
-        "  uv run ai-phone hangup                                  end the call",
+        "Give your AI the phone: it can run these from any folder",
+        '  ai-phone call +15550100000 --prompt "…" --json   ai-phone\'s agent talks',
+        "  ai-phone call +15550100000 --relay --json        your AI talks (say, listen)",
+        "  ai-phone listen --json                           wait for a call",
+        "  ai-phone hangup                                  end the call",
     ]
     assert max(len(ln) for ln in text.splitlines() if not ln.startswith("Give your AI the phone")) <= 88
 
@@ -2142,8 +2139,8 @@ def test_done_instructions_match_the_enabled_call_directions(inbound, outbound, 
                           allow_inbound=inbound, allow_outbound=outbound)
     text = flow.done_text(actions, flow.Session())
     assert f"Calls    {label}" in text
-    assert ("uv run ai-phone call " in text) is outbound
-    assert ("uv run ai-phone listen --json" in text) is inbound
+    assert ("ai-phone call " in text) is outbound
+    assert ("ai-phone listen --json" in text) is inbound
     assert ("calls out as +15550100009" in text) is outbound
     assert ("Try it" in text) is inbound
     assert ("pjsua --local-port" in text) is inbound
@@ -2151,8 +2148,8 @@ def test_done_instructions_match_the_enabled_call_directions(inbound, outbound, 
         assert "Leave ai-phone running while you want to receive calls." in text
     else:
         assert "Start ai-phone when you want to place a call; stop it with Ctrl-C afterward." in text
-        assert "uv run ai-phone listen --call <id> --json" in text
-    assert "uv run ai-phone hangup" in text
+        assert "ai-phone listen --call <id> --json" in text
+    assert "ai-phone hangup" in text
 
 
 def test_the_done_page_names_secrets_env_only_when_there_is_one(monkeypatch, tmp_path):
@@ -2179,7 +2176,7 @@ def test_done_text_with_one_kind_of_line():
     text = flow.done_text(FakeActions(exists=True), flow.Session())
     lines = text.splitlines()
     assert "Lines    none yet · run setup again to add one" in lines
-    assert lines[lines.index("Try it") + 1] == "  add a line first: uv run ai-phone setup"
+    assert lines[lines.index("Try it") + 1] == "  add a line first: ai-phone setup"
     assert not any("pjsua" in ln for ln in lines)
     long_name = {"a" * 32: {"kind": "sip", "user": "a" * 32, "aor": f"sip:{'a' * 32}@192.0.2.10"}}
     lines = flow.done_text(FakeActions(exists=True, lines=long_name), flow.Session()).splitlines()

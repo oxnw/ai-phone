@@ -545,7 +545,7 @@ The TUI (M5) tails this file. The gate check for M1 is a script over 20 turns: `
 
 ## 10. Getting started
 
-Decided 2026-09-17 (§15): nothing is packaged, published or installed as a background service. People clone the repository, run `scripts/install.sh`, then `ai-phone setup`, and start ai-phone in the foreground with `uv run ai-phone run`. macOS on Apple Silicon only; the Linux backends (§5.4) are later work.
+Decided 2026-09-17 (§15): nothing is packaged, published or installed as a background service. People clone the repository, run `scripts/install.sh`, then `ai-phone setup`, and start ai-phone in the foreground with `ai-phone run`. macOS on Apple Silicon only; the Linux backends (§5.4) are later work.
 
 ### 10.1 Repository layout
 
@@ -570,7 +570,7 @@ ai-phone/
     setup/       ui.py flow.py actions.py plain.py tui.py look.py     # ai-phone setup (§10.3)
     vendor/      pjsua2.py _pjsua2*.so           # built by scripts/install.sh; git-ignored
   native/pjsua2/                    # pjsua2.i, symbols.i (from pjproject 2.17), build.sh, GPL notice; the extension's source
-  scripts/     install.sh  latency_report.py  pjsua_peer.sh  utterances.txt
+  scripts/     install.sh  install_cli.py  latency_report.py  pjsua_peer.sh  utterances.txt
                gate_run.sh  quiet_gate.sh  soak.sh  soak_report.py  spike_trio_latency.py
   tests/       unit/ integration/
   .github/workflows/  tests.yml
@@ -583,10 +583,11 @@ It gets a clone ready to run and is safe to run again. In order, it:
 1. checks for macOS on Apple Silicon, Homebrew and uv, and stops with a one-line error that says how to get what is missing;
 2. installs `swig`, `pkgconf` and `pjproject` with Homebrew, skipping any already installed (the pjproject formula also brings `pjsua`, the softphone for free test calls);
 3. runs `uv sync`;
-4. unless `ai_phone.vendor.pjsua2` already imports, builds the SIP library with `native/pjsua2/build.sh` for the project environment's Python (§3.7), copies it into `src/ai_phone/vendor/` and checks that it imports;
-5. prints the next command, `uv run ai-phone setup`.
+4. unless the native binding provides TLS verifier version 1, builds the SIP library with `native/pjsua2/build.sh` for the project environment's Python (§3.7), copies it into `src/ai_phone/vendor/` and checks the verifier capability;
+5. installs a managed launcher at `~/.local/bin/ai-phone`, preserving the caller's working directory and using this checkout's Python environment directly;
+6. prints the next command, `ai-phone setup`, and any PATH adjustment needed before it is available.
 
-Each step is printed as it starts, and the first failure stops the script. It downloads no models and never touches `~/.ai-phone/`.
+An unrelated existing launcher is never silently replaced. The launcher requires the checkout and environment to remain in place; `uv run ai-phone` remains available for development. Each step is printed as it starts, and the first failure stops the script. It downloads no models and never touches `~/.ai-phone/`.
 
 ### 10.3 The setup wizard (`ai-phone setup [--plain]`)
 
