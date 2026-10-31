@@ -38,6 +38,10 @@ with rebuild guidance if this capability is unavailable; it never falls back to 
 
 The mandatory loopback cases live in `tests/integration/test_tls_verification.py`. Their isolated native probe
 links this same source with test-only observation/fault hooks; those hooks are absent from the installed binding.
+The probe builds with `-Werror` and `OPENSSL_API_COMPAT=30000`, an explicit OpenSSL 3.0 source API baseline.
+OpenSSL 4.x deprecates the existing certificate-time and hostname helpers; the compatibility setting retains
+those APIs without their later deprecation warnings. Certificate checks, test cases and the linked OpenSSL
+dependency are unchanged; APIs deprecated at or before the selected baseline still produce warnings.
 The tests generate temporary certificates and use a local DNS fixture without models, accounts or public network
 access. All 41 maintained native TLS cases passed, including shutdown rejection. Two tests in
 `tests/integration/test_tls_endpoint.py` also pass through the actual Python/SWIG telephony path. The combined

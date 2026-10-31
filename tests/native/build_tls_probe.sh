@@ -20,7 +20,10 @@ done <<< "$DEPENDENCIES"
 [ -n "$OPENSSL_BIN" ] || fail "installed pjproject has no OpenSSL dependency"
 export PKG_CONFIG_PATH="$PJ_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 mkdir -p "$(dirname "$OUTPUT")"
+# Keep the verifier's OpenSSL 3.0 API baseline when newer dependency headers
+# deprecate these still-supported APIs. Retain -Werror and all verification tests.
 clang++ -std=c++17 -Wall -Wextra -Werror -DAI_PHONE_TLS_VERIFY_TESTS \
+  -DOPENSSL_API_COMPAT=30000 \
   -Inative/pjsua2 "${INCLUDES[@]}" $(pkg-config --static --cflags libpjproject) \
   tests/native/tls_probe.cpp native/pjsua2/tls_verify.cpp \
   "${LIB_DIRS[@]}" $(pkg-config --static --libs libpjproject) -o "$OUTPUT"
