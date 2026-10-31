@@ -415,3 +415,112 @@ def test_old_configs_keep_kokoro_and_phonon_selects_its_bundled_voice(tmp_path):
 def test_speech_options_are_validated_for_the_selected_engine(tmp_path, tts, field):
     with pytest.raises(ConfigError, match=f"config.tts.{field}"):
         _load(tmp_path, f"tts: {{{tts}}}\n")
+
+
+def _tls_policy_line(**changes):
+    line = {
+        "kind": "trunk", "user": "agent123", "number": "+15555550100",
+        "registrar": "sip:registrar.example.test:5061;transport=tls", "dial_domain": "calls.example.test",
+        "outbound_proxy": "sip:tenant.sip.example.test:5061;transport=tls", "register_via_proxy": True,
+        "transport": "tls", "tls_hostname_policy": "verified_wildcard",
+    }
+    return {**line, **changes}
+
+
+def _load_tls_policy(tmp_path, line):
+    import yaml
+
+    return _load(tmp_path, yaml.safe_dump({"lines": {"test": line}})).lines["test"]
+
+
+def test_tls_hostname_policy_is_strict_when_omitted_even_for_signalwire(tmp_path):
+    from ai_phone.config import tls_proxy_hostname
+
+    assert LineConfig().tls_hostname_policy == "strict"
+    line = _tls_policy_line(provider={"name": "signalwire", "state": "ready"})
+    line.pop("tls_hostname_policy")
+    loaded = _load_tls_policy(tmp_path, line)
+    assert loaded.tls_hostname_policy == "strict"
+    assert tls_proxy_hostname(loaded) is None
+    assert tls_proxy_hostname(LineConfig(kind="sip", transport="udp")) is None
+
+
+def test_verified_wildcard_uses_only_the_fixed_proxy_identity_without_rewriting_config(tmp_path):
+    from ai_phone.config import tls_proxy_hostname
+
+    proxy = "sip:Tenant.SIP.Example.TEST:5061;transport=tls"
+    loaded = _load_tls_policy(tmp_path, _tls_policy_line(outbound_proxy=proxy))
+    assert loaded.tls_hostname_policy == "verified_wildcard"
+    assert tls_proxy_hostname(loaded) == "tenant.sip.example.test"
+    assert loaded.outbound_proxy == proxy
+    assert "registrar" not in tls_proxy_hostname(loaded)
+
+
+@pytest.mark.parametrize("policy", ["unknown", "insecure", "", True, 1, None, [], {}])
+def test_tls_hostname_policy_rejects_unknown_values_and_wrong_types(tmp_path, policy):
+    with pytest.raises(ConfigError, match=r"config.lines.test.tls_hostname_policy"):
+        _load_tls_policy(tmp_path, _tls_policy_line(tls_hostname_policy=policy))
+
+
+@pytest.mark.parametrize("changes, field", [
+    ({"kind": "sip"}, "tls_hostname_policy"),
+    ({"transport": "tcp"}, "tls_hostname_policy"),
+    ({"transport": "udp"}, "tls_hostname_policy"),
+    ({"outbound_proxy": None}, "outbound_proxy"),
+    ({"outbound_proxy": ""}, "outbound_proxy"),
+    ({"outbound_proxy": "sip:tenant.example.test"}, "outbound_proxy"),
+    ({"outbound_proxy": "sip:tenant.example.test;transport=tcp"}, "outbound_proxy"),
+    ({"outbound_proxy": "sips:tenant.example.test"}, "outbound_proxy"),
+    ({"register_via_proxy": False}, "tls_hostname_policy"),
+])
+def test_verified_wildcard_requires_a_tls_trunk_and_fixed_registration_proxy(tmp_path, changes, field):
+    with pytest.raises(ConfigError, match=rf"config.lines.test.{field}"):
+        _load_tls_policy(tmp_path, _tls_policy_line(**changes))
+
+
+@pytest.mark.parametrize("host", [
+    "127.0.0.1", "127.1", "2130706433", "[::1]", "::1", "*.example.test",
+    "tenant..example.test", ".example.test", "example.test.", "-tenant.example.test",
+    "tenant-.example.test", "tenant_name.example.test", "ténant.example.test",
+    "a" * 64 + ".example.test", ".".join(["a" * 63] * 3 + ["a" * 62]),
+])
+def test_verified_wildcard_proxy_must_be_an_ascii_dns_name(tmp_path, host):
+    proxy = f"sip:{host}:5061;transport=tls"
+    with pytest.raises(ConfigError, match=r"config.lines.test.outbound_proxy"):
+        _load_tls_policy(tmp_path, _tls_policy_line(outbound_proxy=proxy))
+
+
+@pytest.mark.parametrize("host", ["proxy", "xn--bcher-kva.example.test", ".".join(["a" * 63] * 3 + ["a" * 61])])
+def test_verified_wildcard_accepts_valid_dns_label_boundaries(tmp_path, host):
+    from ai_phone.config import tls_proxy_hostname
+
+    line = _load_tls_policy(tmp_path, _tls_policy_line(outbound_proxy=f"sip:{host};transport=tls"))
+    assert tls_proxy_hostname(line) == host
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "999999", "-1", "abc"])
+def test_verified_wildcard_proxy_port_must_be_valid(tmp_path, port):
+    proxy = f"sip:tenant.example.test:{port};transport=tls"
+    with pytest.raises(ConfigError, match=r"config.lines.test.outbound_proxy"):
+        _load_tls_policy(tmp_path, _tls_policy_line(outbound_proxy=proxy))
+
+
+@pytest.mark.parametrize("port", ["1", "5061", "65535"])
+def test_verified_wildcard_accepts_valid_explicit_proxy_ports(tmp_path, port):
+    from ai_phone.config import tls_proxy_hostname
+
+    proxy = f"sip:tenant.example.test:{port};transport=tls"
+    assert tls_proxy_hostname(_load_tls_policy(tmp_path, _tls_policy_line(outbound_proxy=proxy))) == "tenant.example.test"
+
+
+@pytest.mark.parametrize("changes", [
+    {"tls_hostname_policy": "unknown"}, {"tls_hostname_policy": True},
+    {"register_via_proxy": 1}, {"register_via_proxy": "true"},
+    {"outbound_proxy": False}, {"outbound_proxy": "sip:*.example.test;transport=tls"},
+    {"transport": "tcp"}, {"kind": "sip"},
+])
+def test_tls_policy_helper_also_validates_direct_dataclass_construction(changes):
+    from ai_phone.config import tls_proxy_hostname
+
+    with pytest.raises(ConfigError, match=r"runtime\.test\."):
+        tls_proxy_hostname(LineConfig(**_tls_policy_line(**changes)), "runtime.test")

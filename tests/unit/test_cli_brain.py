@@ -109,8 +109,8 @@ if sys.argv[1:3] == ["auth", "status"]:
 
 note(event="start", argv=sys.argv[1:], cwd=os.getcwd(), entries=sorted(os.listdir(".")),
      claude_env=sorted(k for k in os.environ if k.startswith("CLAUDE")),
-     provider_env=sorted(k for k in os.environ if k.startswith(("ANTHROPIC", "OPENAI", "AWS"))
-                         or k.endswith(("_API_KEY", "_BASE_URL"))),
+     provider_env=sorted(k for k in os.environ if k.startswith(("ANTHROPIC", "OPENAI", "AWS", "SIGNALWIRE_"))
+                         or k.endswith(("_API_KEY", "_API_TOKEN", "_BASE_URL"))),
      codex_home=os.environ.get("CODEX_HOME"))
 
 if SPEC["protocol"] == "claude":
@@ -1055,6 +1055,21 @@ def test_neither_cli_inherits_a_key_or_a_base_url(cli, monkeypatch):
     started = cli.events("start")[0]
     assert started["provider_env"] == [] and started["claude_env"] == []
     assert "LANG" not in started["provider_env"]
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex"])
+def test_subscription_cli_never_receives_signalwire_account_context(cli, monkeypatch, kind):
+    names = ("SIGNALWIRE_API_TOKEN", "SIGNALWIRE_PROJECT_ID", "SIGNALWIRE_SPACE", "CUSTOM_CARRIER_API_TOKEN")
+    for name in names:
+        monkeypatch.setenv(name, "synthetic-carrier-context")
+    cli.script(kind, [{"deltas": ["Hi."]}])
+    brain = claude_brain(cli) if kind == "claude" else codex_brain(cli)
+    try:
+        list(brain.stream(1, talk("Hi"), 120))
+    finally:
+        brain.close()
+    assert cli.events("start")[0]["provider_env"] == []
+    assert all(os.environ[name] == "synthetic-carrier-context" for name in names)
 
 
 def test_a_cli_logged_in_with_an_api_key_is_refused_before_a_turn(cli):

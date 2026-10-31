@@ -1,0 +1,10 @@
+{
+  "type": "verified_caller_id",
+  "id": "66666666-6666-4666-8666-666666666666",
+  "number": "+15555550200",
+  "name": "+15555550200",
+  "extension": null,
+  "verified": false,
+  "verified_at": null,
+  "status": "Awaiting Verification"
+}

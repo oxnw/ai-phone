@@ -306,11 +306,14 @@ def test_a_key_that_does_not_work(home):
     with pytest.raises(ActionError, match="^Could not reach Telnyx: telnyx GET /available_phone_numbers: ConnectError$"):
         a.search_numbers("telnyx", a_key, "US", "212")
 
-    def no_token(name, key, secret=None):
-        raise ProviderError("twilio needs --secret-env (the Auth Token) as well as --key-env (the Account SID)")
+    def refused_token(name, key, secret=None):
+        raise ProviderError("twilio rejected the Auth Token")
 
     with pytest.raises(ActionError, match="That key did not work"):
-        make(home, provider_loader=no_token).owned_numbers("twilio", {"TWILIO_ACCOUNT_SID": "AC"})
+        make(home, provider_loader=refused_token).owned_numbers("twilio",
+            {"TWILIO_ACCOUNT_SID": "AC", "TWILIO_AUTH_TOKEN": "invalid-token"})
+    with pytest.raises(ActionError, match="Enter all Twilio credential fields"):
+        make(home, provider_loader=refused_token).owned_numbers("twilio", {"TWILIO_ACCOUNT_SID": "AC"})
 
 
 def test_buy_number_writes_a_ready_line_quietly(home, capsys):
@@ -550,6 +553,16 @@ def test_use_caller_id_switches_both_ways_without_keys_or_carrier_requests(home,
     assert load_config(home / "config.yaml").lines["main"].caller_id == "+15555550100"
 
 
+@pytest.mark.parametrize("action", ["use_caller_id", "record_caller_id"])
+def test_account_from_cannot_save_an_ineffective_caller_id(home, action):
+    a = caller_id_actions(home, from_user="account")
+    before = (home / "config.yaml").read_bytes()
+    args = ("main", BOUGHT, "fake") if action == "record_caller_id" else ("main", BOUGHT)
+    with pytest.raises(ActionError, match="configure the caller ID with your provider"):
+        getattr(a, action)(*args)
+    assert (home / "config.yaml").read_bytes() == before
+
+
 @pytest.mark.parametrize("provider", [None, {"name": "fake", "state": "ready"}])
 def test_use_caller_id_keeps_an_omitted_verification_list_omitted(home, provider):
     a = caller_id_actions(home, provider=provider)
@@ -680,6 +693,16 @@ def test_add_trunk_line(home):
     assert ln.password_env == "AI_PHONE_LINE_TRUNK_PASSWORD"
     assert load_secrets()["AI_PHONE_LINE_TRUNK_PASSWORD"] == "pw-SECRET"
     assert "pw-SECRET" not in (home / "config.yaml").read_text()
+
+
+@pytest.mark.parametrize("number", ["+15555550100", ""])
+def test_add_trunk_with_account_from_can_omit_a_phone_number(home, number):
+    a = make(home)
+    assert a.add_trunk_line("sip:trunk.example.org", "account1", "pw-SECRET", number, "udp",
+                            from_user="account") == "trunk"
+    line = load_config(home / "config.yaml").lines["trunk"]
+    assert line.from_user == "account" and line.number == (number or None)
+    assert raw(home)["lines"]["trunk"]["from_user"] == "account"
 
 
 def test_a_bad_trunk_leaves_no_secret_behind(home):
@@ -1352,3 +1375,265 @@ def test_choosing_the_other_plan_drops_the_path_to_the_first_ones_cli(home):
     assert "cli" not in raw(home)["brain"], "a path to Claude Code was left behind to run Codex"
     assert raw(home)["brain"] == {"kind": "chatgpt", "model": "gpt-5.6-luna", "first_token_timeout_ms": 20000}
     assert a._cli_path("chatgpt") is None
+
+
+SIGNALWIRE_CREDS = {"SIGNALWIRE_PROJECT_ID": "project-test", "SIGNALWIRE_API_TOKEN": "token-SECRET",
+                    "SIGNALWIRE_SPACE": "example.signalwire.com"}
+
+
+class ManagedCallerIdProvider:
+    """Only the CLI/action boundary: real API request shapes are covered by the provider suite."""
+    name = "signalwire"
+
+    def __init__(self):
+        self.events = []
+        self.refuse = False
+        self.wrong_context = False
+
+    def validate_context(self, journal):
+        self.events.append("context")
+        if self.wrong_context:
+            raise ProviderError("This journal belongs to another SignalWire Space or Project.")
+        assert journal.doc["signalwire"] == {"space": "example.signalwire.com", "project_id": "project-test"}
+
+    def pending_caller_id(self, journal):
+        change = journal.doc.get("caller_id_change", {})
+        return change.get("desired") if not change.get("local_committed") else None
+
+    def apply_caller_id(self, journal, number):
+        self.events.append(("apply", number))
+        if self.refuse:
+            raise ProviderError("Caller ID rejected: token-SECRET")
+        journal.doc["caller_id_change"] = {"desired": number, "previous": BOUGHT,
+                                           "remote_applied": True, "local_committed": False}
+        journal._save()
+        return number
+
+    def finish_caller_id(self, journal):
+        self.events.append("finish")
+        journal.doc["caller_id_change"]["local_committed"] = True
+        journal._save()
+
+    def start_caller_id_verification(self, number):
+        self.events.append(("verify", number))
+        return VerificationStep("enter_code_in_cli", "Enter code", {})
+
+
+def managed_caller_id_actions(home, provider=None, *, verification=True):
+    provider = provider or ManagedCallerIdProvider()
+    resources = {"sip_resource_id": "resource-1", "sip_endpoint_id": "endpoint-1", "brought_number_id": "number-1"}
+    line = {"kind": "trunk", "number": BOUGHT, "caller_id": BOUGHT, "user": "account1", "from_user": "account",
+            "registrar": "sip:example.sip.signalwire.com:5061", "dial_domain": "example.sip.signalwire.com:5061",
+            "transport": "tls", "srtp": "required",
+            "provider": {"name": "signalwire", "state": "ready", "resources": resources}}
+    if verification:
+        line["verified_caller_ids"] = [{"number": "+15555550100", "provider": "signalwire",
+                                        "verified_at": "2026-10-01T12:00:00Z"}]
+    journal = Journal.open(home / "lines", "main", "signalwire")
+    journal.start("endpoint")
+    journal.finish("endpoint", **resources)
+    journal.doc["signalwire"] = {"space": "example.signalwire.com", "project_id": "project-test"}
+    journal.set_state("ready")
+    a = make(home, yaml.safe_dump({"inbound": {"greeting": "Hi"}, "lines": {"main": line}}),
+             provider_loader=lambda name, **kwargs: provider)
+    return a, provider
+
+
+def test_signalwire_credentials_map_space_project_and_token_explicitly(home):
+    seen = []
+
+    def loader(name, **kwargs):
+        seen.append((name, kwargs))
+        return FakeProvider()
+
+    a = make(home, provider_loader=loader)
+    a.owned_numbers("signalwire", SIGNALWIRE_CREDS)
+    assert seen == [("signalwire", {"key": "project-test", "secret": "token-SECRET", "space": "example.signalwire.com"})]
+    with pytest.raises(ActionError, match="all SignalWire credential fields"):
+        a.owned_numbers("signalwire", {"SIGNALWIRE_PROJECT_ID": "project-test", "SIGNALWIRE_API_TOKEN": "token-SECRET"})
+    assert len(seen) == 1
+
+
+def test_signalwire_purchase_is_refused_before_constructing_provider_or_saving_keys(home):
+    a = make(home, provider_loader=lambda *args, **kw: pytest.fail("purchase must not reach provider"))
+    with pytest.raises(ActionError, match="existing number"):
+        a.buy_number("signalwire", SIGNALWIRE_CREDS, Number(BOUGHT, None, None, False, "number-1"))
+    assert not (home / "secrets.env").exists() and not (home / "config.yaml").exists()
+
+
+def test_signalwire_manual_preset_keeps_credentials_separate_and_number_optional(home):
+    a = make(home)
+    line_id = a.add_trunk_line("sip:example.sip.signalwire.com:5061", "account1", "sip-SECRET", "", "tls",
+                               preset="signalwire", srtp="required")
+    line = load_config(home / "config.yaml").lines[line_id]
+    assert line_id == "signalwire" and line.from_user == "account" and line.number is None
+    assert line.tls_hostname_policy == "verified_wildcard"
+    assert line.registrar.endswith(";transport=tls")
+    assert line.transport == "tls" and line.srtp == "required" and line.outbound_proxy == line.registrar
+    assert line.provider is None and line.accept_invites_from == "registered_trunk"
+    assert "sip-SECRET" not in (home / "config.yaml").read_text()
+    assert load_secrets() == {"AI_PHONE_LINE_SIGNALWIRE_PASSWORD": "sip-SECRET"}
+
+
+def test_signalwire_caller_id_requires_credentials_and_matching_journal_before_remote_change(home):
+    a, provider = managed_caller_id_actions(home)
+    before = (home / "config.yaml").read_bytes()
+    with pytest.raises(ActionError, match="credentials"):
+        a.use_caller_id("main", "+15555550100")
+    assert provider.events == []
+    (home / "lines" / "main.journal.json").unlink()
+    with pytest.raises(ActionError, match="journal is missing"):
+        a.use_caller_id("main", "+15555550100", SIGNALWIRE_CREDS)
+    assert provider.events == [] and (home / "config.yaml").read_bytes() == before
+
+
+def test_signalwire_context_mismatch_stops_verification_and_caller_id_change(home):
+    a, provider = managed_caller_id_actions(home)
+    provider.wrong_context = True
+    before = (home / "config.yaml").read_bytes()
+    with pytest.raises(ActionError, match="another SignalWire Space"):
+        a.start_caller_id("signalwire", SIGNALWIRE_CREDS, "+15555550100", line_id="main")
+    with pytest.raises(ActionError, match="another SignalWire Space"):
+        a.use_caller_id("main", "+15555550100", SIGNALWIRE_CREDS)
+    assert provider.events == ["context", "context"]
+    assert (home / "config.yaml").read_bytes() == before
+
+
+def test_signalwire_failed_remote_caller_id_change_preserves_local_config_and_redacts_token(home):
+    a, provider = managed_caller_id_actions(home)
+    provider.refuse = True
+    before = (home / "config.yaml").read_bytes()
+    with pytest.raises(ActionError) as exc:
+        a.use_caller_id("main", "+15555550100", SIGNALWIRE_CREDS)
+    assert "token-SECRET" not in str(exc.value) and "Caller ID rejected" in str(exc.value)
+    assert (home / "config.yaml").read_bytes() == before and "finish" not in provider.events
+
+
+def test_signalwire_own_number_change_does_not_invent_verification_history(home):
+    a, provider = managed_caller_id_actions(home, verification=False)
+    a.use_caller_id("main", BOUGHT, SIGNALWIRE_CREDS)
+    assert raw(home)["lines"]["main"]["caller_id"] == BOUGHT
+    assert "verified_caller_ids" not in raw(home)["lines"]["main"]
+    assert provider.events == ["context", ("apply", BOUGHT), "finish"]
+
+
+def test_signalwire_verified_caller_id_is_applied_remotely_before_local_commit(home):
+    a, provider = managed_caller_id_actions(home, verification=False)
+    a.record_caller_id("main", "+15555550102", "signalwire", SIGNALWIRE_CREDS)
+    line = raw(home)["lines"]["main"]
+    assert line["caller_id"] == "+15555550102"
+    assert [(v["number"], v["provider"]) for v in line["verified_caller_ids"]] == [("+15555550102", "signalwire")]
+    assert provider.events == ["context", ("apply", "+15555550102"), "finish"]
+    assert Journal.open(home / "lines", "main").doc["caller_id_change"]["local_committed"]
+
+
+def test_signalwire_local_write_failure_leaves_remote_change_resumable(home, monkeypatch):
+    from ai_phone import cli_lines
+    from ai_phone.cli import main
+    from ai_phone.lines import caller_id
+    a, provider = managed_caller_id_actions(home, verification=False)
+    before = (home / "config.yaml").read_bytes()
+    original = caller_id.update_line
+
+    def disk_failure(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(caller_id, "update_line", disk_failure)
+    with pytest.raises(ActionError, match="lines resume main"):
+        a.record_caller_id("main", "+15555550102", "signalwire", SIGNALWIRE_CREDS)
+    assert (home / "config.yaml").read_bytes() == before
+    assert provider.pending_caller_id(Journal.open(home / "lines", "main")) == "+15555550102"
+    monkeypatch.setattr(caller_id, "update_line", original)
+    monkeypatch.setattr(cli_lines, "_provider", lambda args: provider)
+    assert main(["lines", "resume", "main", "--key-env", "PROJECT_ID", "--space", "example.signalwire.com"]) == 0
+    assert raw(home)["lines"]["main"]["caller_id"] == "+15555550102"
+    assert raw(home)["lines"]["main"]["verified_caller_ids"][0]["number"] == "+15555550102"
+    assert provider.pending_caller_id(Journal.open(home / "lines", "main")) is None
+
+
+def pending_signalwire(home, *, provider="signalwire", brought=True, state="pending", target=True, line_id="retry"):
+    journal = Journal.open(home / "lines", line_id, provider)
+    journal.start("target" if target else "claim", phone_number=OWNED, brought=brought, source_id="owned-1")
+    journal.finish("target" if target else "claim")
+    journal.start("credentials", user="originaluser", password_env="AI_PHONE_LINE_RETRY_PASSWORD")
+    journal.finish("credentials", user="originaluser", password_env="AI_PHONE_LINE_RETRY_PASSWORD")
+    journal.doc["signalwire"] = {"space": "example.signalwire.com", "project_id": "11111111-1111-4111-8111-111111111111"}
+    journal.set_state(state)
+    write_secret("AI_PHONE_LINE_RETRY_PASSWORD", "original-sip-SECRET")
+    return journal
+
+
+def test_signalwire_resumable_numbers_reads_pending_attachment_without_writes(home):
+    journal = pending_signalwire(home)
+    a = make(home)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (home / "lines").glob("*.json")}
+    assert a.resumable_numbers("signalwire") == {OWNED: "retry"}
+    assert a.resumable_numbers("twilio") == {}
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in before} == before
+    assert journal.doc["provider"] == "signalwire"
+
+
+@pytest.mark.parametrize("settings", [
+    {"provider": "twilio"}, {"brought": False}, {"state": "rollback_failed"}, {"state": "ready"},
+    {"state": "failed"}, {"target": False},
+])
+def test_signalwire_resume_picker_excludes_ineligible_journals(home, settings):
+    pending_signalwire(home, **settings)
+    assert make(home).resumable_numbers("signalwire") == {}
+
+
+@pytest.mark.parametrize("line_id", ["retry", "another-line"])
+def test_signalwire_resume_picker_excludes_configured_lines_and_numbers(home, line_id):
+    pending_signalwire(home)
+    a = make(home, yaml.safe_dump({"lines": {line_id: {"number": OWNED}}}))
+    assert a.resumable_numbers("signalwire") == {}
+
+
+def test_signalwire_resume_picker_excludes_ambiguous_number_claims(home):
+    pending_signalwire(home)
+    pending_signalwire(home, provider="twilio", line_id="other")
+    assert make(home).resumable_numbers("signalwire") == {}
+
+
+def test_signalwire_wizard_retry_reuses_line_and_sip_credentials(home):
+    pending_signalwire(home)
+    received = []
+
+    class RetryProvider(FakeProvider):
+        name = "signalwire"
+
+        def attach(self, journal, number, line_id, user, password):
+            received.append((line_id, user, password, number.source_id))
+            return super().attach(journal, number, line_id, user, password)
+
+    provider = RetryProvider()
+    a = make(home, provider_loader=lambda name, **kwargs: provider)
+    number = Number(OWNED, None, None, False, "owned-1")
+    assert a.resumable_numbers("signalwire") == {OWNED: "retry"}
+    result = a.attach_number("signalwire", SIGNALWIRE_CREDS, number)
+    assert (result.line_id, result.code) == ("retry", 0)
+    assert received == [("retry", "originaluser", "original-sip-SECRET", "owned-1")]
+    assert load_secrets()["AI_PHONE_LINE_RETRY_PASSWORD"] == "original-sip-SECRET"
+    assert set(load_config(home / "config.yaml").lines) == {"retry"}
+    assert sorted(p.name for p in (home / "lines").glob("*.journal.json")) == ["retry.journal.json"]
+    assert provider.created == {"profile": 1, "connection": 1}
+    assert a.resumable_numbers("signalwire") == {}
+
+
+@pytest.mark.parametrize("changed", ["space", "project"])
+def test_signalwire_wizard_retry_rejects_wrong_context_before_http(home, changed):
+    from ai_phone.providers.signalwire import SignalWireProvider
+    pending_signalwire(home)
+    creds = {"SIGNALWIRE_PROJECT_ID": "11111111-1111-4111-8111-111111111111", "SIGNALWIRE_API_TOKEN": "token-SECRET",
+             "SIGNALWIRE_SPACE": "example.signalwire.com"}
+    creds["SIGNALWIRE_SPACE" if changed == "space" else "SIGNALWIRE_PROJECT_ID"] = (
+        "another.signalwire.com" if changed == "space" else "22222222-2222-4222-8222-222222222222")
+    http = httpx.Client(transport=httpx.MockTransport(lambda req: pytest.fail("context mismatch must precede every request")))
+    a = make(home, provider_loader=lambda name, **kwargs: SignalWireProvider(**kwargs, http=http))
+    result = a.attach_number("signalwire", creds, Number(OWNED, None, None, False, "owned-1"))
+    assert result.code == 3 and result.line_id == "retry"
+    assert "different Space or Project" in result.messages[0]
+    assert not (home / "config.yaml").exists()
+    journal = Journal.open(home / "lines", "retry")
+    assert journal.steps_done() == ["target", "credentials"]
+    assert load_secrets()["AI_PHONE_LINE_RETRY_PASSWORD"] == "original-sip-SECRET"

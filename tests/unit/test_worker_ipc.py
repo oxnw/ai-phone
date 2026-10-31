@@ -254,6 +254,19 @@ async def test_factory_args_reach_the_backend():
     await c.stop()
 
 
+@pytest.mark.parametrize("name", ["SIGNALWIRE_PROJECT_ID", "SIGNALWIRE_SPACE", "SIGNALWIRE_API_TOKEN",
+                                 "CUSTOM_CARRIER_API_TOKEN"])
+def test_worker_spawn_hides_carrier_credentials_and_account_context(monkeypatch, name):
+    from ai_phone.services.client import scrubbed_environment
+
+    monkeypatch.setenv(name, "synthetic-carrier-context")
+    monkeypatch.setenv("LANG", "en_GB.UTF-8")
+    with scrubbed_environment():
+        assert name not in os.environ
+        assert os.environ["LANG"] == "en_GB.UTF-8"
+    assert os.environ[name] == "synthetic-carrier-context"
+
+
 @pytest.mark.asyncio
 async def test_workers_never_see_line_passwords(monkeypatch):
     monkeypatch.setenv("AI_PHONE_LINE_MAIN_PASSWORD", "hunter2")

@@ -10,9 +10,13 @@ PJ_PREFIX="$(brew --prefix --installed pjproject)" || fail "pjproject is not ins
 # The current formula can name a different OpenSSL major from that keg.
 DEPENDENCIES="$(brew deps pjproject)" || fail "could not read pjproject's installed dependencies"
 DEPENDENCY_LIBS=()
+DEPENDENCY_INCLUDES=()
 while IFS= read -r dependency; do
   [ -n "$dependency" ] || continue
   prefix="$(brew --prefix --installed "$dependency")" || fail "pjproject dependency $dependency is missing; run brew reinstall pjproject"
+  if [ -d "$prefix/include" ]; then
+    DEPENDENCY_INCLUDES+=("-I$prefix/include")
+  fi
   if [ -d "$prefix/lib" ]; then
     DEPENDENCY_LIBS+=("-L$prefix/lib")
     PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -32,6 +36,6 @@ CXXFLAGS="$(pkg-config --static --cflags libpjproject)"
 LIBS="$(pkg-config --static --libs libpjproject)"
 # Some keg-only dependencies are named by libpjproject.pc without a search path.
 clang++ -std=c++17 -O2 -fPIC -shared -undefined dynamic_lookup \
-  $CXXFLAGS -I"$PY_INC" "$OUT/pjsua2_wrap.cpp" "${DEPENDENCY_LIBS[@]}" $LIBS \
+  $CXXFLAGS -I. -I"$PY_INC" "${DEPENDENCY_INCLUDES[@]}" "$OUT/pjsua2_wrap.cpp" tls_verify.cpp "${DEPENDENCY_LIBS[@]}" $LIBS \
   -o "$OUT/_pjsua2$EXT_SUFFIX"
 echo "built: $OUT/_pjsua2$EXT_SUFFIX and $OUT/pjsua2.py"

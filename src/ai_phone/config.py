@@ -38,6 +38,8 @@ SIP_URI_RE = re.compile(rf"^sip:{_HOST}(?::[0-9]{{1,5}})?(?:;transport=(?:udp|tc
 AOR_RE = re.compile(rf"^sip:[A-Za-z0-9._-]{{1,64}}@{_HOST}(?::[0-9]{{1,5}})?$")
 DISPLAY_RE = re.compile(r"^[\x20\x21\x23-\x5b\x5d-\x7e]{1,64}$")  # printable ASCII without '"' and '\'
 CIDR_RE = re.compile(r"^[0-9a-fA-F:.]+(/[0-9]{1,3})?$")
+DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+TLS_PROXY_RE = re.compile(r"sip:(?P<host>[A-Za-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?;transport=tls")
 TtsEngine = Literal["kokoro", "phonon"]
 TTS_ENGINES = typing.get_args(TtsEngine)
 
@@ -106,6 +108,7 @@ class LineConfig:
     dial_domain: str | None = None
     register_via_proxy: bool = True
     transport: Literal["udp", "tcp", "tls"] = "udp"
+    tls_hostname_policy: Literal["strict", "verified_wildcard"] = "strict"
     user: str = "aiphone"
     password_env: str | None = None
     register_expiry_sec: int = 300
@@ -114,6 +117,7 @@ class LineConfig:
     trusted_cidrs: list[str] = field(default_factory=list)
     trusted_peers: list[str] = field(default_factory=list)
     caller_id: str | None = None
+    from_user: Literal["number", "account"] = "number"
     diverted_from: list[str] = field(default_factory=list)
     verified_caller_ids: list[VerifiedCallerId] = field(default_factory=list)
     provider: ProviderRef | None = None
@@ -399,6 +403,36 @@ def _require(cond: bool, msg: str) -> None:
         raise ConfigError(msg)
 
 
+def tls_proxy_hostname(line: LineConfig, path: str = "line") -> str | None:
+    """Validate the explicit TLS policy; return its fixed proxy DNS name without mutating the line.
+
+    Shared with runtime validation because callers may construct line dataclasses directly.
+    Strict lines retain the existing transport behavior and need no fixed proxy identity.
+    """
+    policy = line.tls_hostname_policy
+    policy_path = f"{path}.tls_hostname_policy"
+    _require(isinstance(policy, str) and policy in ("strict", "verified_wildcard"),
+             f"{policy_path}: expected strict or verified_wildcard")
+    if policy == "strict":
+        return None
+    _require(line.kind == "trunk" and line.transport == "tls",
+             f"{policy_path}: verified_wildcard requires kind: trunk and transport: tls")
+    _require(line.register_via_proxy is True,
+             f"{policy_path}: verified_wildcard requires register_via_proxy: true")
+    proxy = line.outbound_proxy
+    match = TLS_PROXY_RE.fullmatch(proxy) if isinstance(proxy, str) else None
+    _require(match is not None,
+             f"{path}.outbound_proxy: verified_wildcard requires sip:DNS-host[:port];transport=tls")
+    host, port = match.group("host"), match.group("port")
+    _require(port is None or 1 <= int(port) <= 65535,
+             f"{path}.outbound_proxy: port must be between 1 and 65535")
+    # Numeric/dotted numeric forms include ordinary IP literals and legacy short IPv4 forms.
+    _require(len(host) <= 253 and not host.replace(".", "").isdigit()
+             and all(DNS_LABEL_RE.fullmatch(label) for label in host.split(".")),
+             f"{path}.outbound_proxy: expected an ASCII DNS name with labels of 1 to 63 characters; no IP or wildcard")
+    return host.lower()
+
+
 def validate_config(cfg: Config, env: Mapping[str, str] | None = None) -> list[str]:
     """Hard errors raise ConfigError; soft problems (a line whose password is not set) come back as warnings."""
     import os
@@ -431,6 +465,9 @@ def validate_config(cfg: Config, env: Mapping[str, str] | None = None) -> list[s
     for lid, ln in cfg.lines.items():
         p = f"config.lines.{lid}"
         _require(bool(LINE_ID_RE.fullmatch(lid)), f"{p}: line ids must match {LINE_ID_RE.pattern}")
+        tls_proxy_hostname(ln, p)
+        _require(ln.from_user in ("number", "account"), f"{p}.from_user: expected number or account")
+        _require(ln.kind == "trunk" or ln.from_user == "number", f"{p}.from_user: account is only valid on a trunk line")
         if ln.kind == "trunk":
             _require(bool(USER_RE.fullmatch(ln.user)), f"{p}.user: must match {USER_RE.pattern} (letters and digits, 4 to 32)")
         else:

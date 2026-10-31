@@ -64,7 +64,7 @@ src/ai_phone/  telephony/ (endpoint, call, media_port, policy, events, state, ri
                pipeline/  (turn, replies, prompts, vad, bargein, chunker, audio_out, timing)
                services/  (base, ipc, worker, client, errors, backends/ incl. openai_compat)
                lines/     (journal, config_writer, forward, credentials)     — provisioning bookkeeping (CLI only)
-               providers/ (base, telnyx, twilio, fake)                       — carrier REST (CLI only; the daemon never imports it)
+               providers/ (base, telnyx, twilio, signalwire, fake)                       — carrier REST (CLI only; the daemon never imports it)
                control/   (protocol, server, client)                        — the unix control socket
                setup/     (ui, flow, actions, plain, tui, look)              — `ai-phone setup` (CLI only)
                calls.py (call records), call_guard.py (emergency block, daily limit)
@@ -79,7 +79,24 @@ state:         ~/.ai-phone/state.json · control.sock · calls-today.json (daily
 
 ## Lines (Milestone 2)
 
-An agent is reachable through lines: a number bought with your own Telnyx or Twilio key (`ai-phone lines add telnyx --key-env TELNYX_API_KEY`) or one already on that account (`--existing +1555…`), your own phone diverted to it (`ai-phone lines forward main --when no-answer --from +44…` prints the dial codes), a free SIP address for agent-to-agent calls (`ai-phone lines add sip …`), or a trunk you bring. The daemon sees only SIP either way; `ai-phone call <number|sip:…>` dials out with the agent's number (or your verified mobile) as caller ID and opens with an AI disclosure line; `ai-phone status` shows registration per line. Provisioning is journaled and resumable (`lines resume`), and `lines remove` undoes everything ai-phone created at the carrier; a number you brought is disconnected, never released. Configuration applies at restart. The brain is pluggable: `brain: {kind: openai_compatible, base_url: …}` makes any OpenAI-compatible server the agent, and `{kind: claude, model: haiku}` or `{kind: chatgpt, model: gpt-5.6-luna}` makes it the Claude or ChatGPT plan you already pay for, through the CLI you are logged into — no API key, the plan's own limits, and a second or two slower to the first word than the model on this Mac. Full detail in `architecture.md` §14a.
+An agent is reachable through lines: a number bought with your own Telnyx or Twilio key (`ai-phone lines add telnyx --key-env TELNYX_API_KEY`) or one already on a Telnyx, Twilio or SignalWire account (`--existing +1555…`), your own phone diverted to it (`ai-phone lines forward main --when no-answer --from +44…` prints the dial codes), a free SIP address for agent-to-agent calls (`ai-phone lines add sip …`), or a trunk you bring. The daemon sees only SIP either way; `ai-phone call <number|sip:…>` dials out with the agent's number (or your verified mobile) as caller ID and opens with an AI disclosure line; `ai-phone status` shows registration per line. Provisioning is journaled and resumable (`lines resume`), and `lines remove` undoes everything ai-phone created at the carrier; a number you brought is disconnected, never released. Configuration applies at restart. The brain is pluggable: `brain: {kind: openai_compatible, base_url: …}` makes any OpenAI-compatible server the agent, and `{kind: claude, model: haiku}` or `{kind: chatgpt, model: gpt-5.6-luna}` makes it the Claude or ChatGPT plan you already pay for, through the CLI you are logged into — no API key, the plan's own limits, and a second or two slower to the first word than the model on this Mac. Full detail in `architecture.md` §14a.
+
+SignalWire setup uses a Space host, Project ID and API token; its API creates a SIP credential and routes an
+existing number to it. It does not purchase numbers; buy through the carrier portal, then connect the existing
+number. `from_user: account` uses the SIP username in outbound From;
+the endpoint's `send_as` controls the displayed number and is changed through CLI/setup. Existing trunks default to
+`from_user: number`. Manual account-mode trunks use the carrier portal for caller ID. Real calls in both
+directions exchanged speech, showed the expected caller-ID numbers and ended normally on 2026-10-31 using a
+combined development preview between US numbers. The standalone SignalWire branch passed 1,489 unit tests
+and 52 local SIP/TLS checks. These calls
+are not a latency or voice-quality benchmark. See [the setup guide](docs/signalwire.md) for scope and limits.
+
+TLS hostname verification defaults to `strict`. The explicit per-line `verified_wildcard` policy requires a TLS
+trunk and fixed TLS outbound proxy with `register_via_proxy: true`. Its dedicated native transport verifies the
+chain, dates and DNS SAN during the handshake, before SIP; no Common Name fallback or partial/multi-label
+wildcards are accepted. Independent inbound TLS connections are rejected; SIP on the authenticated outgoing
+connection remains usable. New SignalWire TLS setups select this policy, while existing lines retain their saved
+choice. An older native binding must be rebuilt by the installer. See `architecture.md` §14a.8.
 
 ## Agent tool (Milestone 3)
 
@@ -87,7 +104,7 @@ Any AI that can run shell commands uses ai-phone as its phone, in one of two mod
 
 ## Get started (Milestone 4)
 
-No packages: people clone the repo, run `./scripts/install.sh` (Homebrew's swig, pkgconf and pjproject, `uv sync`, then the SIP library build into `src/ai_phone/vendor/`), then `uv run ai-phone setup`. Setup is a full-screen wizard (numbered prompts with `--plain` or without a terminal) that asks only what applies: where the agent thinks (this Mac, or your own endpoint), a line (a new or existing Twilio/Telnyx number, a free SIP address, or your own trunk), a voice, and what callers hear; it then checks the models, the config, the lines and the voice, and ends with how to start ai-phone and what to tell your AI. Everything it saves goes under `~/.ai-phone/` (`config.yaml`, `secrets.env`, the carrier journals), and a step's answers are written only when the step completes. `ai-phone models pull` is the same download without the wizard. Carrier and endpoint requests happen only in `lines`, `models pull` and `setup`, never in the daemon. Full detail in `architecture.md` §10.
+No packages: people clone the repo, run `./scripts/install.sh` (Homebrew's swig, pkgconf and pjproject, `uv sync`, then the SIP library build into `src/ai_phone/vendor/`), then `uv run ai-phone setup`. Setup is a full-screen wizard (numbered prompts with `--plain` or without a terminal) that asks only what applies: where the agent thinks (this Mac, or your own endpoint), a line (a new or existing Twilio/Telnyx number, an existing SignalWire number, a free SIP address, or your own trunk), a voice, and what callers hear; it then checks the models, the config, the lines and the voice, and ends with how to start ai-phone and what to tell your AI. Everything it saves goes under `~/.ai-phone/` (`config.yaml`, `secrets.env`, the carrier journals), and a step's answers are written only when the step completes. `ai-phone models pull` is the same download without the wizard. Carrier and endpoint requests happen only in `lines`, `models pull` and `setup`, never in the daemon. Full detail in `architecture.md` §10.
 
 ## Milestone gates
 

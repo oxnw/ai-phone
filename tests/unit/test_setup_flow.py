@@ -168,6 +168,9 @@ class FakeActions:
     def unfinished_numbers(self):
         return self._call("unfinished_numbers") or set()
 
+    def resumable_numbers(self, carrier):
+        return self._call("resumable_numbers", carrier) or {}
+
     def voices(self, *, engine="kokoro"):
         return self._call("voices", engine) if engine == "kokoro" else self._call("phonon_voices", engine)
 
@@ -250,21 +253,21 @@ class FakeActions:
         self._call("forward", line_id, mobile, when)
         return divert_codes(when, self.cur.lines[line_id]["number"])
 
-    def start_caller_id(self, carrier, creds, number):
+    def start_caller_id(self, carrier, creds, number, *, line_id=None):
         """The fake carrier's step: a code texted to the number, and "123456" is the one it sent."""
-        return self._call("start_caller_id", carrier, dict(creds), number) or \
+        return self._call("start_caller_id", carrier, dict(creds), number, *((line_id,) if line_id else ())) or \
             VerificationStep("enter_code_in_cli", f"Enter the 6-digit code sent to {number}", {"e164": number})
 
     def check_caller_id(self, carrier, creds, step, code):
         seeded = self._call("check_caller_id", carrier, dict(creds), step, code)
         return code == "123456" if seeded is None else seeded
 
-    def record_caller_id(self, line_id, number, carrier):
-        self._call("record_caller_id", line_id, number, carrier)
+    def record_caller_id(self, line_id, number, carrier, creds=None):
+        self._call("record_caller_id", line_id, number, carrier, *((creds,) if creds else ()))
         self.cur.lines[line_id]["caller_id"] = number
 
-    def use_caller_id(self, line_id, number):
-        self._call("use_caller_id", line_id, number)
+    def use_caller_id(self, line_id, number, creds=None):
+        self._call("use_caller_id", line_id, number, *((creds,) if creds else ()))
         self.cur.lines[line_id]["caller_id"] = number
 
     def add_sip_line(self, name, host):
@@ -272,9 +275,10 @@ class FakeActions:
         self.cur.lines[line_id] = {"kind": "sip", "user": name, "aor": f"sip:{name}@{host}"}
         return line_id
 
-    def add_trunk_line(self, registrar, user, password, number, transport):
-        line_id = self._call("add_trunk_line", registrar, user, password, number, transport) or "trunk"
-        self.cur.lines[line_id] = {"kind": "trunk", "number": number}
+    def add_trunk_line(self, registrar, user, password, number, transport, from_user="number", *, preset=None, srtp="off"):
+        line_id = self._call("add_trunk_line", registrar, user, password, number, transport, from_user,
+                             *((preset, srtp) if preset else ())) or preset or "trunk"
+        self.cur.lines[line_id] = {"kind": "trunk", "number": number, "user": user, "from_user": from_user, "registrar": registrar}
         return line_id
 
     def save_voice(self, voice, speed, *, engine="kokoro"):
@@ -341,7 +345,7 @@ def test_new_setup_local_brain_sip_line_default_voice():
         "This computer has 24 GB of memory. Models that need more may swap and answer slowly."
     assert [o.label for o in ui.menu("Which connection should ai-phone use")[1]][3] == "Skip"
     assert ui.menu("Which connection should ai-phone use")[1][3].hint == "add one later"
-    assert ui.menu("Which connection should ai-phone use")[1][0].hint == "Twilio or Telnyx · a new number, or one already on that account"
+    assert ui.menu("Which connection should ai-phone use")[1][0].hint == "Twilio, Telnyx or SignalWire"
     group = ui.menu("American · female")
     assert [o.label for o in group[1]] == ["Bella", "Heart"] and group[2] == 1 and group[1][1].hint == "current"
     assert ui.questions("Heart")[0].detail == "American · female"
@@ -969,6 +973,26 @@ def test_manual_trunks_can_reuse_caller_ids_but_do_not_offer_carrier_verificatio
     assert not actions.args("saved_keys")
 
 
+@pytest.mark.parametrize("number", ["+15555550100", None])
+def test_account_from_explains_provider_control_without_offering_caller_id_edits(number):
+    line = {**caller_id_line(number=number), "user": "account1", "from_user": "account"}
+    before = dict(line)
+    actions = FakeActions(exists=True, lines={"main": line, "normal": caller_id_line()})
+    ui = edit_caller_id(("Your provider controls this caller ID", "Continue"),
+                       ("Everything works", "Continue"), FINISH, number=number or "account1")
+    outcome = drive(ui, actions)
+    assert outcome.code == 0
+    assert line == before and not actions.changes()
+    assert not actions.args("saved_keys") and not actions.args("start_caller_id")
+    assert not ui.questions("Which number should people see?")
+    options = ui.menu("Which line's caller ID?")[1]
+    assert options[0].hint == "caller ID set by your provider"
+    assert "+15555550101" in options[1].hint
+    main_row = next(row for row in outcome.summary.splitlines() if "main" in row)
+    assert main_row.endswith("caller ID set by your provider")
+    assert "calls out as" not in main_row and "+15555550101" not in main_row
+
+
 @pytest.mark.parametrize("outbound,lines,question", [
     (False, {"main": caller_id_line()}, "Outgoing calls are off"),
     (True, {"agent": SIP_LINE}, "No phone-number lines are ready"),
@@ -1324,6 +1348,7 @@ def test_own_trunk():
     ui = ScriptedUI([
         ("Give your AI", "Add a line"),
         ("Which connection should ai-phone use?", "My own SIP trunk"),
+        ("What should outgoing SIP From use?", "<default>"),
         ("Your SIP trunk", ["sip.example.com", "alex1234", "pwSECRET", "+15550100000"]),
         ("Which transport?", "TLS"),
         ("Your SIP trunk", ["", "", "pwSECRET2", ""]),
@@ -1334,8 +1359,8 @@ def test_own_trunk():
     bad = "config.lines.trunk.registrar: expected sip:host[:port][;transport=…]"
     actions = FakeActions(exists=True, add_trunk_line=Seq(ActionError(bad), "trunk"))
     assert drive(ui, actions).code == 0
-    assert actions.args("add_trunk_line") == [("sip:sip.example.com", "alex1234", "pwSECRET", "+15550100000", "tls"),
-                                              ("sip:sip.example.com", "alex1234", "pwSECRET2", "+15550100000", "tls")]
+    assert actions.args("add_trunk_line") == [("sip:sip.example.com", "alex1234", "pwSECRET", "+15550100000", "tls", "number"),
+                                              ("sip:sip.example.com", "alex1234", "pwSECRET2", "+15550100000", "tls", "number")]
     retry = ui.questions("Your SIP trunk")[1]
     assert retry.error == bad
     assert [f.default for f in ui.fields[4:]] == ["sip.example.com", "alex1234", "", "+15550100000"]
@@ -1348,13 +1373,33 @@ def test_own_trunk_keeps_sips_and_the_password_as_typed():
     ui = ScriptedUI([
         ("Give your AI", "Add a line"),
         ("Which connection should ai-phone use?", "My own SIP trunk"),
+        ("What should outgoing SIP From use?", "Phone number"),
         ("Your SIP trunk", ["  sips:sip.example.com ", " alex1234 ", "  pw SECRET  ", " +15550100000 "]),
         ("Which transport?", "TLS"),
         ("Everything works", "<quit>"),
     ])
     actions = FakeActions(exists=True)
     drive(ui, actions)
-    assert actions.args("add_trunk_line") == [("sips:sip.example.com", "alex1234", "  pw SECRET  ", "+15550100000", "tls")]
+    assert actions.args("add_trunk_line") == [("sips:sip.example.com", "alex1234", "  pw SECRET  ", "+15550100000", "tls", "number")]
+
+
+def test_own_trunk_account_from_allows_no_number_and_explains_provider_caller_id():
+    ui = ScriptedUI([
+        ("Give your AI", "Add a line"),
+        ("Which connection should ai-phone use?", "My own SIP trunk"),
+        ("What should outgoing SIP From use?", "SIP username"),
+        ("Your SIP trunk", ["trunk.example.org", "account1", "pwSECRET", ""]),
+        ("Which transport?", "UDP"),
+        ("Everything works", "Continue"), FINISH,
+    ])
+    actions = FakeActions(exists=True)
+    outcome = drive(ui, actions)
+    assert outcome.code == 0
+    assert actions.args("add_trunk_line") == [("sip:trunk.example.org", "account1", "pwSECRET", "", "udp", "account")]
+    assert "caller ID set by your provider" in outcome.summary
+    assert "provider controls the displayed caller ID" in page_text(ui.questions("What should outgoing SIP From use?")[0])
+    assert ui.fields[3].label == "Your number on it (optional)"
+    assert not actions.args("start_caller_id")
 
 
 def test_sip_address_name_taken_is_asked_again():
@@ -2401,3 +2446,152 @@ def test_a_subscription_brain_needs_no_model_download():
     rows = ui.questions("A few things need attention")[0].checks
     assert rows[0] == Check("Models", "Parakeet 0.6B v2\nKokoro 82M", True) and not actions.args("pull_models")
     assert Check("Brain", "Claude (Opus) · logged in", True) in rows
+
+
+SIGNALWIRE = {"SIGNALWIRE_PROJECT_ID": "project-test", "SIGNALWIRE_API_TOKEN": "token-SECRET",
+              "SIGNALWIRE_SPACE": "example.signalwire.com"}
+
+
+def test_signalwire_setup_maps_all_credentials_and_only_attaches_existing_number():
+    actions = FakeActions()
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Your SignalWire credentials", ["project-test", "token-SECRET", "example.signalwire.com"]),
+        ("Which number?", OWNED[0].e164), ("Connect", f"Connect {OWNED[0].e164}"),
+        ("Also forward", "No"), ("Show your own number", "No"),
+    ])
+    session = flow.Session()
+    flow.phone_number(ui, actions, session)
+    assert not ui.answers
+    assert actions.args("owned_numbers") == [("signalwire", SIGNALWIRE)]
+    assert actions.args("attach_number") == [("signalwire", SIGNALWIRE, OWNED[0])]
+    assert not actions.args("buy_number") and not actions.args("search_numbers")
+    assert [(f.label, f.secret) for f in ui.fields] == [("Project ID", True), ("API token", True), ("Space host", False)]
+    assert all("token-SECRET" not in page_text(page) for page in ui.pages)
+
+
+def test_signalwire_without_numbers_explains_portal_purchase_without_searching():
+    actions = FakeActions(saved_keys=SIGNALWIRE, owned_numbers=[])
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Use the saved SignalWire key?", "Use the saved key"),
+        ("No unconnected numbers", "Continue"),
+    ])
+    flow.phone_number(ui, actions, flow.Session())
+    assert not ui.answers and not actions.changes()
+    assert not actions.args("search_numbers")
+    assert "SignalWire dashboard" in page_text(ui.pages[-1])
+
+
+def test_signalwire_manual_setup_needs_no_api_credentials_and_sets_account_identity():
+    actions = FakeActions()
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Use SIP credentials"),
+        ("Your SignalWire SIP trunk", ["example.sip.signalwire.com:5061", "account1", "sip-SECRET", ""]),
+        ("Which transport?", "<default>"), ("Media encryption", "Required"),
+    ])
+    flow.phone_number(ui, actions, flow.Session())
+    assert not ui.answers
+    assert actions.args("add_trunk_line") == [("sip:example.sip.signalwire.com:5061", "account1", "sip-SECRET", "",
+                                               "tls", "account", "signalwire", "required")]
+    assert not actions.args("saved_keys") and not actions.args("owned_numbers")
+    summary = flow.done_text(actions, flow.Session())
+    assert "sip:account1@example.sip.signalwire.com:5061" in summary
+    assert "number is still being set up" not in summary
+    assert "call the number routed to your SIP account" in summary
+
+
+def test_signalwire_caller_id_shortcut_collects_credentials_even_for_own_number():
+    line = {**caller_id_line(carrier="signalwire"), "from_user": "account", "user": "account1"}
+    actions = FakeActions(exists=True, lines={"main": line}, saved_keys=SIGNALWIRE,
+                          owned_numbers=[Number(line["number"], None, None, False, "number-id")])
+    ui = ScriptedUI([
+        ("Which line's caller ID?", f"main · {line['number']}"),
+        ("Which number should people see?", f"Line's number · {line['number']}"),
+        ("Use the saved SignalWire key?", "Use the saved key"),
+    ])
+    session = flow.Session()
+    flow.change_caller_id(ui, actions, session)
+    assert not ui.answers
+    assert actions.args("use_caller_id") == [("main", line["number"], SIGNALWIRE)]
+    assert actions.args("owned_numbers") == [("signalwire", SIGNALWIRE)]
+    assert "Updating the caller ID" in [p.question for p in ui.pages]
+
+
+def test_signalwire_verified_caller_id_applies_with_same_credentials_and_line_context():
+    line = {**caller_id_line(carrier="signalwire"), "from_user": "account"}
+    actions = FakeActions(exists=True, lines={"main": line})
+    ui = ScriptedUI([("Your mobile number", ["+15555550102"]), ("Enter the code", ["123456"])])
+    flow.verify_caller_id(ui, actions, flow.Session(), "signalwire", "SignalWire", SIGNALWIRE, "main", line["number"])
+    assert actions.args("start_caller_id") == [("signalwire", SIGNALWIRE, "+15555550102", "main")]
+    assert actions.args("record_caller_id") == [("main", "+15555550102", "signalwire", SIGNALWIRE)]
+
+
+def test_numberless_manual_account_trunk_has_a_useful_summary_and_test_instruction():
+    line = {"kind": "trunk", "from_user": "account", "user": "account1", "registrar": "sip:sip.example.com"}
+    summary = flow.done_text(FakeActions(lines={"trunk": line}), flow.Session())
+    assert "sip:account1@sip.example.com" in summary
+    assert "still being set up" not in summary
+    assert "caller ID set by your provider" in summary
+
+
+def test_signalwire_pending_number_is_offered_as_resume_and_uses_existing_attachment_path():
+    actions = FakeActions(saved_keys=SIGNALWIRE, owned_numbers=OWNED[:1],
+                          unfinished_numbers={OWNED[0].e164}, resumable_numbers={OWNED[0].e164: "retry"},
+                          attach_number=LineResult("retry", 0, ["Line retry is ready."]))
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Use the saved SignalWire key?", "Use the saved key"),
+        ("Which number?", f"Resume {OWNED[0].e164}"), ("Resume setup", f"Resume {OWNED[0].e164}"),
+        ("Also forward", "No"), ("Show your own number", "No"),
+    ])
+    flow.phone_number(ui, actions, flow.Session())
+    assert not ui.answers
+    option = ui.menu("Which number?")[1][0]
+    assert option.label == f"Resume {OWNED[0].e164}" and option.hint == "unfinished line retry"
+    assert actions.args("attach_number") == [("signalwire", SIGNALWIRE, OWNED[0])]
+    assert actions.args("resumable_numbers") == [("signalwire",)]
+    assert not actions.args("buy_number") and not actions.args("search_numbers")
+    assert f"Resuming {OWNED[0].e164}…" in ui.labels
+    assert "saved SIP credentials" in ui.questions("Resume setup")[0].detail
+
+
+def test_signalwire_ineligible_unfinished_number_shows_recovery_instead_of_buying():
+    actions = FakeActions(saved_keys=SIGNALWIRE, owned_numbers=OWNED[:1], unfinished_numbers={OWNED[0].e164})
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Use the saved SignalWire key?", "Use the saved key"), ("An earlier setup needs attention", "Continue"),
+    ])
+    flow.phone_number(ui, actions, flow.Session())
+    page = ui.questions("An earlier setup needs attention")[0]
+    text = page_text(page)
+    assert "Buy a" not in text and "lines list" in text
+    assert "lines resume <line> --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN" in text
+    assert "lines remove <line> --key-env SIGNALWIRE_PROJECT_ID --secret-env SIGNALWIRE_API_TOKEN" in text
+    assert "SIGNALWIRE_SPACE" in text and "original carrier account" in text
+    assert not actions.changes() and not ui.answers
+
+
+def test_signalwire_pending_number_does_not_expose_other_ineligible_numbers():
+    actions = FakeActions(saved_keys=SIGNALWIRE, unfinished_numbers={n.e164 for n in OWNED},
+                          resumable_numbers={OWNED[1].e164: "retry"})
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Use the saved SignalWire key?", "Use the saved key"), ("Which number?", "<quit>"),
+    ])
+    with pytest.raises(Cancel):
+        flow.phone_number(ui, actions, flow.Session())
+    assert [o.label for o in ui.menu("Which number?")[1]] == [f"Resume {OWNED[1].e164}"]
+    assert not actions.changes()
+
+
+def test_signalwire_already_configured_numbers_do_not_prompt_another_purchase():
+    actions = FakeActions(saved_keys=SIGNALWIRE, owned_numbers=OWNED[:1], lines={"main": {"number": OWNED[0].e164}})
+    ui = ScriptedUI([
+        ("Which carrier?", "SignalWire"), ("How should SignalWire connect?", "Connect with API"),
+        ("Use the saved SignalWire key?", "Use the saved key"), ("No unconnected numbers", "Continue"),
+    ])
+    flow.phone_number(ui, actions, flow.Session())
+    text = page_text(ui.questions("No unconnected numbers")[0])
+    assert "already configured" in text and "Buy a" not in text and "lines list" in text
+    assert not actions.changes()

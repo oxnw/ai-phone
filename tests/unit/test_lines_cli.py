@@ -122,6 +122,63 @@ def test_add_trunk_and_sip_by_hand(home: Path):
     assert cfg.lines["agents"].aor == "sip:agents@home.example.org" and cfg.lines["agents"].accept_invites_from == "trusted"
 
 
+@pytest.mark.parametrize("mode,number", [(None, "+15555550100"), ("number", "+15555550100"),
+                                         ("account", "+15555550100"), ("account", None)])
+def test_manual_trunk_from_user_is_saved_and_defaults_to_number(home, mode, number):
+    from ai_phone.lines.config_writer import read_raw
+    args = ["lines", "add", "trunk", "--id", "byo", "--registrar", "sip:trunk.example.org",
+            "--user", "account1", "--password-env", "BYO_PW"]
+    if mode is not None:
+        args += ["--from-user", mode]
+    if number is not None:
+        args += ["--number", number]
+    assert main(args) == 0
+    line = load_config(home / "config.yaml").lines["byo"]
+    assert line.from_user == (mode or "number")
+    assert line.number == number
+    if mode == "account":
+        assert read_raw(home / "config.yaml")["lines"]["byo"]["from_user"] == "account"
+        assert line.caller_id is None
+
+
+@pytest.mark.parametrize("provider", ["sip", "fake", "telnyx", "twilio"])
+@pytest.mark.parametrize("mode", ["number", "account"])
+def test_from_user_option_refuses_non_manual_trunks_before_provider_access(home, monkeypatch, capsys, provider, mode):
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *a: pytest.fail("must not contact a carrier"))
+    before = (home / "config.yaml").read_bytes()
+    assert main(["lines", "add", provider, "--from-user", mode]) == 3
+    assert "--from-user only applies to a trunk" in capsys.readouterr().out
+    assert (home / "config.yaml").read_bytes() == before
+
+
+@pytest.mark.parametrize("mode,number", [("number", None), ("account", "not-a-number")])
+def test_manual_trunk_from_user_keeps_number_validation(home, mode, number):
+    args = ["lines", "add", "trunk", "--id", "byo", "--registrar", "sip:trunk.example.org",
+            "--user", "account1", "--password-env", "BYO_PW", "--from-user", mode]
+    if number is not None:
+        args += ["--number", number]
+    assert main(args) == 3
+    assert not load_config(home / "config.yaml").lines
+
+
+def test_account_from_refuses_caller_id_verification_before_provider_access(home, monkeypatch, capsys):
+    from ai_phone.lines.config_writer import update_line
+    assert main(["lines", "add", "fake", "--key-env", "FAKE_KEY", "--id", "main", "--yes"]) == 0
+    update_line(home / "config.yaml", "main", from_user="account")
+    before = (home / "config.yaml").read_bytes()
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *a: pytest.fail("must not contact a carrier"))
+    assert main(["lines", "verify-caller-id", "main", "+15555550101", "--key-env", "FAKE_KEY"]) == 3
+    assert "configure the caller ID with your provider" in capsys.readouterr().out
+    assert (home / "config.yaml").read_bytes() == before
+
+
+@pytest.mark.parametrize("mode,kind", [("invalid", "trunk"), ("account", "sip")])
+def test_manual_line_refuses_invalid_identity_policy(mode, kind):
+    from ai_phone.cli_lines import manual_line
+    with pytest.raises(ValueError, match="from_user"):
+        manual_line(kind, user="account1", host="example.org", from_user=mode)
+
+
 def test_forward_prints_codes_and_records_divert(home: Path, capsys):
     main(["lines", "add", "fake", "--key-env", "FAKE_KEY", "--id", "main", "--yes"])
     assert main(["lines", "forward", "main", "--when", "no-answer", "--from", "+447700900123"]) == 0
@@ -272,7 +329,7 @@ def test_add_existing_connects_without_buying(home: Path, monkeypatch, capsys):
     carrier = _fake_carrier(home)
     assert carrier["carrier"]["owned"]["name"] == "+442079460099" and "number" not in carrier["carrier"] and "number" not in carrier["created"]
     assert "Line main is ready: +442079460099" in capsys.readouterr().out
-    assert Journal.open(home / "lines", "main").doc["steps"][0]["planned"] == {"phone_number": "+442079460099", "brought": True}
+    assert Journal.open(home / "lines", "main").doc["steps"][0]["planned"] == {"phone_number": "+442079460099", "brought": True, "source_id": "owned-1"}
 
 
 def test_add_existing_stops_when_the_answer_is_no(home: Path, monkeypatch):
@@ -412,7 +469,7 @@ def test_an_unfinished_buy_blocks_a_bring_under_the_same_id(home: Path, monkeypa
     assert "ai-phone lines resume main" in out and "ai-phone lines remove main" in out
     assert "owned" not in _fake_carrier(home)["carrier"]
     steps = Journal.open(home / "lines", "main").doc["steps"]
-    assert steps[0]["planned"] == {"phone_number": "+442079460000", "brought": False} and "claim" not in [s["name"] for s in steps]
+    assert steps[0]["planned"] == {"phone_number": "+442079460000", "brought": False, "source_id": "src-0"} and "claim" not in [s["name"] for s in steps]
     # the same request again is a retry, not a mix: it finishes the purchase
     assert main(["lines", "add", "fake", "--key-env", "FAKE_KEY", "--id", "main", "--yes"]) == 0
     assert load_config(home / "config.yaml").lines["main"].number == "+442079460000"
@@ -539,10 +596,10 @@ def test_journal_setups_reads_every_journal_without_writing(home: Path):
     before = {p.name: p.stat().st_mtime_ns for p in (home / "lines").iterdir()}
     assert journal_setups() == {
         "broken": JournalSetup("?", False, "?", False),
-        "early": JournalSetup("?", False, "pending", False),
-        "empty": JournalSetup(None, False, "pending", False),
-        "old": JournalSetup("+442079460002", False, "rollback_failed", False),
-        "shop": JournalSetup("+442079460099", True, "pending", True),
+        "early": JournalSetup("?", False, "pending", False, "fake"),
+        "empty": JournalSetup(None, False, "pending", False, "fake"),
+        "old": JournalSetup("+442079460002", False, "rollback_failed", False, "fake"),
+        "shop": JournalSetup("+442079460099", True, "pending", True, "fake"),
     }
     assert {p.name: p.stat().st_mtime_ns for p in (home / "lines").iterdir()} == before
 
@@ -664,3 +721,126 @@ def test_an_old_format_brought_number_is_never_listed_to_release(home: Path, cap
     from ai_phone.cli_lines import _carrier_ids
     assert _carrier_ids({"number_id": "owned-1", "number_brought": True, "connection_id": "c1"}) == ({"connection_id": "c1"}, "owned-1")
     assert _carrier_ids({"number_sid": "PN2", "brought_number_sid": "PN9", "number_brought": True}) == ({"number_sid": "PN2"}, "PN9")
+
+
+def test_signalwire_purchase_requires_portal_before_any_provider_access(home, monkeypatch, capsys):
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *args: pytest.fail("purchase must not construct a provider"))
+    assert main(["lines", "add", "signalwire", "--id", "main", "--yes"]) == 3
+    assert "Buy a number in your SignalWire Space" in capsys.readouterr().out
+    assert not load_config(home / "config.yaml").lines and not (home / "secrets.env").exists()
+
+
+def test_signalwire_manual_preset_is_numberless_encrypted_and_lists_the_account(home, capsys):
+    assert main(["lines", "add", "trunk", "--preset", "signalwire", "--id", "main",
+                 "--registrar", "sip:example.sip.signalwire.com:5061", "--user", "account1",
+                 "--password-env", "SIP_PASSWORD"]) == 0
+    line = load_config(home / "config.yaml").lines["main"]
+    assert line.from_user == "account" and line.number is None and line.caller_id is None
+    assert line.tls_hostname_policy == "verified_wildcard"
+    assert line.registrar.endswith(";transport=tls")
+    assert line.transport == "tls" and line.srtp == "required" and line.outbound_proxy == line.registrar
+    assert line.accept_invites_from == "registered_trunk" and line.trusted_cidrs == []
+    assert main(["lines", "list"]) == 0
+    assert "sip:account1@example.sip.signalwire.com:5061" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("provider", ["sip", "twilio", "telnyx", "signalwire"])
+def test_signalwire_preset_rejects_nonmanual_lines_without_api_access(home, monkeypatch, provider):
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *args: pytest.fail("must not construct a provider"))
+    assert main(["lines", "add", provider, "--preset", "signalwire"]) == 3
+
+
+def test_signalwire_add_resume_remove_keep_space_and_original_number_id(home, monkeypatch):
+    from ai_phone.providers.base import Number
+    from ai_phone.providers.fake import FakeProvider, OWNED
+    from ai_phone.lines.config_writer import read_raw
+    source = "12345678-1234-4123-8123-123456789012"
+    seen = []
+    attaches = []
+
+    class SourceSensitiveProvider(FakeProvider):
+        name = "signalwire"
+
+        def owned_numbers(self):
+            return [Number(OWNED, None, None, False, source)]
+
+        def attach(self, journal, number, line_id, user, password):
+            assert number.source_id == source, "resume must retain the carrier's ID rather than substitute E.164"
+            attaches.append(number.source_id)
+            return super().attach(journal, number, line_id, user, password)
+
+    def loader(name, **kwargs):
+        seen.append((name, kwargs))
+        return SourceSensitiveProvider()
+
+    monkeypatch.setattr("ai_phone.providers.load_provider", loader)
+    monkeypatch.setenv("PROJECT_ID", "project-test")
+    monkeypatch.setenv("API_TOKEN", "token-test")
+    context = ["--key-env", "PROJECT_ID", "--secret-env", "API_TOKEN", "--space", "example.signalwire.com"]
+    assert main(["lines", "add", "signalwire", "--existing", OWNED, "--id", "main", "--yes", *context]) == 0
+    assert read_raw(home / "config.yaml")["lines"]["main"]["provider"]["name"] == "signalwire"
+    assert main(["lines", "resume", "main", *context]) == 0
+    assert main(["lines", "remove", "main", "--yes", *context]) == 0
+    assert attaches == [source, source]
+    assert seen == [("signalwire", {"key": "project-test", "secret": "token-test", "space": "example.signalwire.com"})] * 3
+    assert not load_config(home / "config.yaml").lines
+
+
+def test_set_caller_id_uses_only_line_eligible_numbers_without_carrier_access(home, monkeypatch):
+    from ai_phone.lines.config_writer import read_raw, update_line
+    main(["lines", "add", "fake", "--key-env", "FAKE_KEY", "--id", "main", "--yes"])
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *args: pytest.fail("number From mode changes locally"))
+    assert main(["lines", "set-caller-id", "main", "+15555550102"]) == 3
+    update_line(home / "config.yaml", "main", verified_caller_ids=[
+        {"number": "+15555550102", "provider": "fake", "verified_at": "2026-10-01T12:00:00Z"}])
+    assert main(["lines", "set-caller-id", "main", "+15555550102"]) == 0
+    assert read_raw(home / "config.yaml")["lines"]["main"]["caller_id"] == "+15555550102"
+    assert main(["lines", "set-caller-id", "main", "+442079460000"]) == 0
+
+
+def test_set_caller_id_without_verification_history_preserves_its_absence(home):
+    from ai_phone.lines.config_writer import read_raw
+    assert main(["lines", "add", "trunk", "--id", "main", "--number", "+15555550100", "--user", "account1",
+                 "--registrar", "sip:trunk.example.org", "--password-env", "SIP_PASSWORD"]) == 0
+    assert main(["lines", "set-caller-id", "main", "+15555550100"]) == 0
+    assert "verified_caller_ids" not in read_raw(home / "config.yaml")["lines"]["main"]
+
+
+@pytest.mark.parametrize("saved_policy", [None, "strict", "verified_wildcard"])
+def test_provider_resume_preserves_existing_tls_policy(home, saved_policy):
+    from ai_phone.cli_lines import _commit
+    from ai_phone.lines.config_writer import read_raw, write_raw
+    from ai_phone.providers.base import ProvisionResult
+    line = {"kind": "trunk", "user": "synthetic", "from_user": "account", "transport": "tls",
+            "dial_domain": "tenant.carrier.test:5061",
+            "registrar": "sip:tenant.carrier.test:5061;transport=tls",
+            "outbound_proxy": "sip:tenant.carrier.test:5061;transport=tls"}
+    previous = dict(line)
+    if saved_policy is not None:
+        previous["tls_hostname_policy"] = saved_policy
+    write_raw(home / "config.yaml", {"lines": {"main": previous}})
+    line["tls_hostname_policy"] = "verified_wildcard"
+    journal = Journal.open(home / "lines", "main", "signalwire")
+    messages = []
+    assert _commit(journal, home / "config.yaml", "main", ProvisionResult("ready", "ready", line),
+                   "SYNTHETIC_PASSWORD", say=messages.append) == 0, messages
+    actual = read_raw(home / "config.yaml")["lines"]["main"]
+    assert actual.get("tls_hostname_policy") == saved_policy
+    if saved_policy is None:
+        assert "tls_hostname_policy" not in actual
+
+
+@pytest.mark.parametrize("transport", ["tcp", "udp"])
+def test_non_tls_signalwire_manual_preset_does_not_enable_wildcard_policy(home, transport):
+    assert main(["lines", "add", "trunk", "--preset", "signalwire", "--id", "main",
+                 "--registrar", "sip:tenant.carrier.test", "--user", "synthetic",
+                 "--password-env", "SYNTHETIC_PASSWORD", "--transport", transport]) == 0
+    line = load_config(home / "config.yaml").lines["main"]
+    assert line.transport == transport and line.tls_hostname_policy == "strict"
+
+
+def test_tls_preset_does_not_rewrite_explicitly_conflicting_proxy_transport(home):
+    assert main(["lines", "add", "trunk", "--preset", "signalwire", "--id", "main",
+                 "--registrar", "sip:tenant.carrier.test;transport=tcp", "--user", "synthetic",
+                 "--password-env", "SYNTHETIC_PASSWORD"]) == 3
+    assert not load_config(home / "config.yaml").lines
