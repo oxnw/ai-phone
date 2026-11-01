@@ -121,6 +121,11 @@ SIP username in outbound From. The default `number` keeps the existing Telnyx/Tw
 used without a local phone number; the provider controls the displayed caller ID. Registration and digest
 credentials are unchanged, and inbound source checks remain in force.
 
+The `user` field accepts 1–64 ASCII letters, digits, dots, underscores and hyphens, such as `usuario_12345`.
+Use the SIP username supplied by your provider; it is preserved in registration and authentication, and in
+outbound From when `from_user: account`. The separate `number` and `caller_id` fields still require E.164
+phone numbers when present. Generated carrier usernames keep their existing alphanumeric format.
+
 TLS lines default to `tls_hostname_policy: strict`. New SignalWire TLS setups explicitly select
 `verified_wildcard`, which verifies the certificate chain, dates and DNS SAN during the handshake on a dedicated
 transport. It requires a fixed TLS outbound proxy and `register_via_proxy: true`. Existing lines retain their

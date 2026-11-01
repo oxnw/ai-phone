@@ -1401,6 +1401,28 @@ def test_own_trunk_account_from_allows_no_number_and_explains_provider_caller_id
     assert not actions.args("start_caller_id")
 
 
+def test_own_trunk_wizard_saves_an_underscored_username_with_real_validation(tmp_path, monkeypatch):
+    from ai_phone.config import load_config
+    from ai_phone.secrets import load_secrets
+    from ai_phone.setup.actions import Actions
+
+    monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path))
+    path = tmp_path / "config.yaml"
+    ui = ScriptedUI([
+        ("What should outgoing SIP From use?", "SIP username"),
+        ("Your SIP trunk", ["trunk.example.org", "usuario_12345", "synthetic-password", ""]),
+        ("Which transport?", "UDP"),
+    ])
+    # Exercise the real config/secret writer; no model, daemon or carrier check is involved.
+    flow.own_trunk(ui, Actions(path, player=object()), flow.Session())
+    assert not ui.answers
+    line = load_config(path).lines["trunk"]
+    assert line.user == "usuario_12345"
+    assert line.from_user == "account" and line.number is None and line.caller_id is None
+    assert load_secrets(tmp_path / "secrets.env")[line.password_env] == "synthetic-password"
+    assert all("synthetic-password" not in page_text(p) for p in ui.pages)
+
+
 def test_sip_address_name_taken_is_asked_again():
     taken = "sip:agent@192.0.2.10 is already line agent; pick another name"
     ui = ScriptedUI([

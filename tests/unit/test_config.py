@@ -121,7 +121,7 @@ def test_inline_legacy_password_is_refused(tmp_path: Path):
 
 
 @pytest.mark.parametrize("patch, msg", [
-    ("    user: \"ab\"\n", "user"),                                  # too short
+    ("    user: \"\"\n", "user"),                                    # empty
     ("    display_name: 'has \"quote\"'\n", "display_name"),
     ("    registrar: \"sip.telnyx.com\"\n", "registrar"),             # not a sip: URI
     ("    dial_domain: \"sip:sip.telnyx.com\"\n", "dial_domain"),     # must be a hostname
