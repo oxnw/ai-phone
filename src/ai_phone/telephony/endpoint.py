@@ -9,7 +9,7 @@ import re
 import weakref
 from dataclasses import dataclass, field
 
-from ai_phone.config import AOR_RE, DISPLAY_RE, E164_RE, SIP_URI_RE, SIP_USER_RE, USER_RE, Config, LineConfig, host_of, tls_proxy_hostname
+from ai_phone.config import AOR_RE, DISPLAY_RE, E164_RE, SIP_URI_RE, SIP_USER_RE, Config, LineConfig, host_of, tls_proxy_hostname
 from ai_phone.telephony import events as ev
 from ai_phone.telephony.call import AiCall, LineAccount
 from ai_phone.telephony.media_port import RingMediaPort
@@ -75,9 +75,9 @@ def _grammar(c: LineConfig) -> None:
         raise ValueError("line from_user must be number or account")
     if c.kind != "trunk" and c.from_user != "number":
         raise ValueError("line from_user: account is only valid on a trunk line")
-    checks = [(DISPLAY_RE, c.display_name, "display_name")]
+    checks = [(DISPLAY_RE, c.display_name, "display_name"), (SIP_USER_RE, c.user, "user")]
     if c.kind == "trunk":
-        checks += [(USER_RE, c.user, "user"), (SIP_URI_RE, c.registrar or "", "registrar")]
+        checks.append((SIP_URI_RE, c.registrar or "", "registrar"))
         if c.number is not None:
             checks.append((E164_RE, c.number, "number"))
         if c.caller_id is not None:
@@ -85,7 +85,7 @@ def _grammar(c: LineConfig) -> None:
         if c.outbound_proxy is not None:
             checks.append((SIP_URI_RE, c.outbound_proxy, "outbound_proxy"))
     else:
-        checks += [(SIP_USER_RE, c.user, "user"), (AOR_RE, c.aor or "", "aor")]
+        checks.append((AOR_RE, c.aor or "", "aor"))
         if c.caller_id is not None:
             checks.append((AOR_RE, c.caller_id, "caller_id"))
     for rx, value, name in checks:
