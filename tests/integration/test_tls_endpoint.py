@@ -198,3 +198,151 @@ def test_python_telephony_uses_verified_tls_factory(tmp_path, endpoint_certifica
     assert not peer.errors, peer.errors
     _assert_port_released(SIP_PORT, socket.SOCK_DGRAM)
     _assert_port_released(SIP_PORT)
+
+SHUTDOWN_CHILD = r'''
+import resource
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+import asyncio
+import json
+from pathlib import Path
+import sys
+import threading
+import weakref
+
+root, result_path = sys.argv[1:]
+sys.path[:0] = [str(Path(root) / "src"), root]
+from ai_phone.telephony import endpoint
+from ai_phone.telephony.pj import pj
+from ai_phone.telephony.rings import FrameRing
+from tests.integration.ports import config
+
+endpoint._system_resolvers = lambda: []
+cfg = config()
+cfg.sip.bind.address = "127.0.0.1"
+cfg.log.pjsip_level = 0
+loop = asyncio.new_event_loop()
+rx, tx = FrameRing(None, 20), FrameRing(None, 20)
+armed, entered, released, finished = [threading.Event() for _ in range(4)]
+quiescing, quiet = threading.Event(), threading.Event()
+order, errors = [], []
+port_ref, helper = None, None
+
+class ObservedPort(endpoint.RingMediaPort):
+    def onFrameReceived(self, frame):
+        if quiet.is_set():
+            errors.append("receive callback after quiescence")
+        blocked = armed.is_set() and not entered.is_set()
+        if blocked:
+            entered.set()
+            if not released.wait(5):
+                errors.append("callback release timed out")
+        try:
+            super().onFrameReceived(frame)
+        except BaseException as exc:
+            errors.append(repr(exc))
+        finally:
+            if blocked:
+                order.append("callback_finished")
+                finished.set()
+
+    def onFrameRequested(self, frame):
+        if quiet.is_set():
+            errors.append("send callback after quiescence")
+        try:
+            super().onFrameRequested(frame)
+        except BaseException as exc:
+            errors.append(repr(exc))
+
+endpoint.RingMediaPort = ObservedPort
+native_quiesce = pj.AudDevManager.setNoDev
+native_destroy = endpoint.AiEndpoint.libDestroy
+tel = endpoint.Telephony(cfg, [], loop, asyncio.Queue(), rx, tx)
+
+def quiesce(manager):
+    assert entered.is_set() and not finished.is_set(), "shutdown must overlap the callback"
+    assert port_ref() is tel.port and tel.port is not None
+    assert tel.port.rx is rx and tel.port.tx is tx and tel.port.echo is False
+    order.append("clock_stopping")
+    quiescing.set()
+    result = native_quiesce(manager)  # real SWIG call releases the GIL while joining the media clock
+    assert finished.is_set(), "setNoDev returned before the callback finished"
+    quiet.set()
+    order.append("clock_stopped")
+    return result
+
+def destroy(ep):
+    assert quiet.is_set(), "endpoint destroyed before the media clock stopped"
+    assert port_ref() is None, "media port must be released before its endpoint"
+    order.append("endpoint_destroying")
+    native_destroy(ep)
+    order.append("endpoint_destroyed")
+
+def release_callback():
+    if not quiescing.wait(5):
+        errors.append("shutdown never quiesced the media clock")
+    released.set()
+
+try:
+    tel.start()
+    # A weak reference observes release without extending the native wrapper's lifetime.
+    port_ref = weakref.ref(tel.port, lambda _: order.append("port_released"))
+    armed.set()
+    assert entered.wait(5), "no native media heartbeat arrived"
+    pj.AudDevManager.setNoDev = quiesce
+    endpoint.AiEndpoint.libDestroy = destroy
+    helper = threading.Thread(target=release_callback)
+    helper.start()
+    tel.stop()
+    helper.join(5)
+    assert not helper.is_alive()
+    assert not errors, errors
+    assert order == ["clock_stopping", "callback_finished", "clock_stopped",
+                     "port_released", "endpoint_destroying", "endpoint_destroyed"], order
+    tel.stop()  # repeated stop must not touch a destroyed endpoint
+    assert tel.ep is None and tel.port is None
+finally:
+    # On assertion failure only, restore ownership before unblocking a live callback.
+    # The passing path never holds an extra strong reference to the media port.
+    if tel.ep is not None and tel.port is None and port_ref is not None:
+        tel.port = port_ref()
+    released.set()
+    if helper is not None:
+        helper.join(5)
+    pj.AudDevManager.setNoDev = native_quiesce
+    endpoint.AiEndpoint.libDestroy = native_destroy
+    if tel.ep is not None:
+        tel.stop()
+    loop.close()
+    for ring in (rx, tx):
+        ring.close()
+        ring.unlink()
+    order.append("rings_closed")
+Path(result_path).write_text(json.dumps({"order": order, "errors": errors}) + "\n")
+'''
+
+
+def test_shutdown_joins_an_inflight_native_media_callback_before_releasing_the_port(tmp_path):
+    assert SIP_PORT != 5060, "use isolated integration ports, normally 5080/5081"
+    _assert_port_released(SIP_PORT, socket.SOCK_DGRAM)
+    _assert_port_released(SIP_PORT)
+    result_path, log_path = tmp_path / "shutdown.json", tmp_path / "shutdown.log"
+    with log_path.open("w") as output:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", SHUTDOWN_CHILD, str(ROOT), str(result_path)],
+            cwd=tmp_path, env=_environment(tmp_path / "home"), stdout=output,
+            stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                pytest.fail("media shutdown child did not finish within 30 seconds")
+            assert proc.returncode == 0, log_path.read_text()[-8000:]
+            report = json.loads(result_path.read_text())
+            assert report["errors"] == []
+            assert report["order"] == ["clock_stopping", "callback_finished", "clock_stopped",
+                                       "port_released", "endpoint_destroying", "endpoint_destroyed", "rings_closed"]
+        finally:
+            _kill_group(proc)
+    _assert_port_released(SIP_PORT, socket.SOCK_DGRAM)
+    _assert_port_released(SIP_PORT)

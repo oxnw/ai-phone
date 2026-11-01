@@ -85,7 +85,7 @@ Total cold start target: under 15 s on the 9B tier on an M5 Pro **[P]**.
 
 ### 2.4 Shutdown sequence
 
-`SIGTERM` or Ctrl+C → if a call is active, play nothing, send BYE, wait ≤ 2 s for the call to release → unregister (REGISTER with Expires 0) → `libDestroy` → send `shutdown` to workers, join with 5 s timeout, then kill → exit 0. Crash of any worker while idle → restart it (max 3 restarts in 10 minutes, then exit non-zero so the service manager notices). Crash mid-call → drop the current turn, say the fixed apology sentence from a cached TTS buffer, restart the worker, continue the call.
+`SIGTERM` or Ctrl+C → if a call is active, play nothing, send BYE, wait ≤ 2 s for the call to release → unregister (REGISTER with Expires 0) → stop and join the null-device media clock with `setNoDev()` while the media port and rings remain owned → release the media port → `libDestroy` → send `shutdown` to workers, join with 5 s timeout, then kill → exit 0. Crash of any worker while idle → restart it (max 3 restarts in 10 minutes, then exit non-zero so the service manager notices). Crash mid-call → drop the current turn, say the fixed apology sentence from a cached TTS buffer, restart the worker, continue the call.
 
 ## 3. Layer 1: Telephony (PJSIP via pjsua2)
 

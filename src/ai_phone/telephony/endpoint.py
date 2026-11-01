@@ -506,6 +506,10 @@ class Telephony:
                 except Exception:
                     pass
             self.accounts = {}
+            if self.port is not None:
+                # Stop and join the null-device media clock while its Python callback target
+                # and rings are still owned. If this fails, retain them and the endpoint.
+                self.ep.audDevManager().setNoDev()
             self.port = None
             self.ep.libDestroy()
             self.ep = None
