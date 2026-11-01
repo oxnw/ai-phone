@@ -24,7 +24,7 @@ def assert_no_task_policy(composed):
 
 @pytest.mark.parametrize("section", [None, "", " ", "\t\n"])
 def test_absent_or_whitespace_sections_use_an_honest_conversation_fallback(section):
-    assert_no_task_policy(prompts.system_prompt(prompts.fixed_instructions(None), section))
+    assert_no_task_policy(prompts.system_prompt(prompts.fixed_instructions(), section))
 
 
 @pytest.mark.asyncio

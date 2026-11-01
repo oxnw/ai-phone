@@ -1,11 +1,16 @@
 """Which backend the daemon starts for each kind of brain, what it tells the person at start-up, and what it writes
 to state.json. The workers themselves are not started here (tests/integration does that)."""
+import asyncio
 from pathlib import Path
+import platform
+import socket
+from unittest.mock import Mock
 
 import pytest
 
-from ai_phone.config import BrainConfig, Config, ConversationConfig, ModelsConfig
+from ai_phone.config import BrainConfig, Config, ConversationConfig, InboundConfig, ModelsConfig
 from ai_phone.daemon import Daemon, brain_warning, drain_timeout_ms, llm_worker, subscription_first_token_ms
+from ai_phone.pipeline import prompts
 
 PROMPT = "You are an AI assistant speaking on a live phone call."
 WIRE = {"wire_memory": True}
@@ -80,13 +85,78 @@ def test_the_start_up_warning_says_where_the_words_go():
     assert "to OpenAI through Codex (not audio)." in chatgpt and "ChatGPT subscription" in chatgpt
 
 
-def test_a_subscription_brain_is_not_on_this_mac_so_the_prompt_says_no_host(tmp_path: Path, monkeypatch):
+HOST_CANARY = "private-owner-host-canary"
+ARCH_CANARY = "private-machine-architecture-canary"
+BRAIN_KINDS = ["local", "openai_compatible", "claude", "chatgpt"]
+
+
+@pytest.fixture
+def identity_readers(monkeypatch):
+    readers = []
+    for module, name, value in ((platform, "node", HOST_CANARY),
+                                (platform, "machine", ARCH_CANARY),
+                                (socket, "gethostname", HOST_CANARY)):
+        reader = Mock(return_value=value)
+        monkeypatch.setattr(module, name, reader)
+        readers.append(reader)
+    return readers
+
+
+def brain_config(kind):
+    options = {"base_url": "https://brain.example.com/v1"} if kind == "openai_compatible" else {}
+    return BrainConfig(kind=kind, **options)
+
+
+@pytest.mark.parametrize("kind", BRAIN_KINDS)
+def test_every_brain_warms_with_phone_policy_without_reading_host_identity(tmp_path, monkeypatch, identity_readers, kind):
     monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path))
-    local = Daemon(Config(), "t4", tmp_path, lan=True, fake=True)
-    plan = Daemon(Config(brain=BrainConfig(kind="chatgpt")), "t4", tmp_path, lan=True, fake=True)
-    assert local.remote_brain is False and plan.remote_brain is True
-    assert "You are running on " in local.fixed_prompt()
-    assert "You are running on " not in plan.fixed_prompt()
+    cfg = Config(brain=brain_config(kind))
+    daemon = Daemon(cfg, "t4", tmp_path, lan=True, fake=True)
+    fixed = daemon.fixed_prompt()
+    # Construct the real backend specification, without starting a worker or contacting the configured brain.
+    worker = llm_worker(cfg, "t4", False, fixed, {}, dict(WIRE))
+
+    assert daemon.remote_brain is (kind != "local")
+    assert worker["warm_args"]["system_prompt"] == fixed == prompts.PHONE_INSTRUCTIONS
+    for canary in (HOST_CANARY, ARCH_CANARY):
+        assert canary not in repr(worker["warm_args"])
+    for reader in identity_readers:
+        reader.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", BRAIN_KINDS)
+@pytest.mark.parametrize("direction", ["in", "out"])
+async def test_real_call_prompt_construction_never_reads_or_sends_host_identity(
+        tmp_path, monkeypatch, identity_readers, kind, direction):
+    from ai_phone import daemon as daemon_mod
+    from tests.unit.test_daemon_calls import CallTel, FakeTC, run_ctx
+
+    monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path))
+    monkeypatch.setattr(daemon_mod, "TurnController", FakeTC)
+    monkeypatch.setattr(FakeTC, "script", "agent")
+    inbound = "Ask who is calling and take a message for Alex."
+    outbound = "Ask whether they are open on Sunday."
+    cfg = Config(brain=brain_config(kind), inbound=InboundConfig(instructions=inbound))
+    daemon = Daemon(cfg, "t4", tmp_path, lan=True, fake=True)
+    context = run_ctx(CallTel())
+    context["fixed"] = daemon.fixed_prompt()  # use the real policy instead of run_ctx's generic FIXED stub
+    record = daemon.calls.new("agent", direction, "agents", "sip:peer@127.0.0.1", outbound if direction == "out" else "")
+    record.pj_call_id = 7
+
+    await asyncio.wait_for(daemon._run_call(record, context), 2)
+
+    prepared = [message["system_prompt"] for message in context["llm"].sent if message["op"] == "llm.prepare"]
+    expected = prompts.PHONE_INSTRUCTIONS + prompts.CALL_SECTION_HEADER + (outbound if direction == "out" else inbound)
+    assert prepared == [expected]
+    assert FakeTC.last.args[11] == expected
+    assert FakeTC.last.kw["generate_opening"] is (direction == "out")
+    assert record.is_ended
+    for canary in (HOST_CANARY, ARCH_CANARY):
+        assert canary not in repr(context["llm"].sent)
+        assert canary not in FakeTC.last.args[11]
+    for reader in identity_readers:
+        reader.assert_not_called()
 
 
 def test_state_json_names_the_brain_the_daemon_is_using(tmp_path: Path, monkeypatch):
