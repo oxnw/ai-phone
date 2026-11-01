@@ -12,8 +12,8 @@ are plans, not shipped features. A configured remote brain still uses local MLX 
 ## The six invariants (never break these)
 
 1. **During a call, no network except SIP/RTP to the peer, and, only if configured, one brain: an endpoint, or the Claude Code / Codex CLI, which talk HTTPS to their provider.** The default brain is the local model and uses no socket; an endpoint that is not on this machine must be `https`, a subscription brain runs the CLI you are logged into as a child of the LLM worker, and the daemon says at start that transcripts, the system prompt and the history go there. No model downloads at runtime (`HF_HUB_OFFLINE=1`), no telemetry, no update checks. STUN and trusted-peer DNS happen at start only. Buying or connecting a number uses a carrier API from `ai-phone lines …` or `ai-phone setup`, never from the daemon, which does not even import the carrier code (see `architecture.md` §14a).
-2. **The PJSIP thread never blocks and never touches models.** Media callbacks only copy 640-byte frames into ring buffers. Model work lives in three child processes.
-3. **Everything internal is 16 kHz int16, 20 ms frames (320 samples).** The wire is 8 kHz G.711 (PCMU/PCMA only; all other codecs disabled). PJSIP resamples 8↔16; we resample TTS 24→16.
+2. **The PJSIP thread never blocks and never touches models.** Media callbacks copy fixed 20 ms frames into ring buffers. Model work lives in three child processes.
+3. **Recognition stays at 16 kHz int16 in 20 ms frames (320 samples). Playback is 16 kHz by default, or 48 kHz when Opus is configured.** The default wire codecs remain G.711 PCMU/PCMA. Opt-in `codecs: [opus, G722, PCMU, PCMA]` preserves higher-rate playback with wideband/narrowband fallback. The native bridge resamples incoming audio into a separate 16 kHz receive port; Python media callbacks never resample. This extends the original fixed-output-rate decision with the maintainer's approval on 2026-11-01.
 4. **Every generation has a `gen_id`.** Cancel means: all workers drop that id, the outbound ring is flushed, late results with a stale id are discarded, the partial reply stays in history marked `[interrupted]`.
 5. **Latency is measured, not claimed.** t0 = last voice-active chunk; t5 = first non-silent RTP frame handed to PJSIP (daemon-side, on the PSTN leg as on the LAN). Budget 900 ms p50, gate 1000 ms. Every turn writes a JSON record with per-stage times.
 6. **One daemon, one or more lines, one call at a time across all of them.** Each line is its own pjsua2 account; every telephony event carries `line_id`; the one-call claim is a lock shared by the PJSIP thread and the asyncio thread.
@@ -37,13 +37,13 @@ L1 knows nothing about models. L3 knows nothing about SIP. L2 owns the conversat
 
 ## One turn, in order
 
-caller audio → `rx_ring` → VAD (Silero, 32 ms chunks) → **speech_end after 300 ms silence (t0)** → STT final (100 ms) → LLM streams tokens (prompt cache hit; 250 ms to first clause, zero slack) → clause chunker (natural text boundaries; 16/24 complete-word fallback) → TTS first chunk (150 ms) → 24→16 kHz → `tx_ring` → RTP (**t5**). Barge-in: ≥ 250 ms of caller speech above a playback-raised energy floor → cancel, flush, next turn; stop ≤ 300 ms from onset.
+caller audio → `rx_ring` → VAD (Silero, 32 ms chunks) → **speech_end after 300 ms silence (t0)** → STT final (100 ms) → LLM streams tokens (prompt cache hit; 250 ms to first clause, zero slack) → clause chunker (natural text boundaries; 16/24 complete-word fallback) → TTS first chunk (150 ms) → 24→16/48 kHz → `tx_ring` → RTP (**t5**). Barge-in: ≥ 250 ms of caller speech above a playback-raised energy floor → cancel, flush, next turn; stop ≤ 300 ms from onset.
 
 ## The stack (decided)
 
 | Layer | Choice | Not this |
 |---|---|---|
-| SIP/RTP | PJSIP 2.17 via pjsua2, extension built on your Mac by `scripts/install.sh`, null audio device, media port at 16 kHz | pyVoIP, Asterisk, LiveKit |
+| SIP/RTP | PJSIP 2.17 via pjsua2, extension built on your Mac by `scripts/install.sh`, null audio device, receive port at 16 kHz and playback at 16/48 kHz | pyVoIP, Asterisk, LiveKit |
 | Pipeline | hand-rolled asyncio | Pipecat (only if it ever deletes more code than it adds) |
 | STT (Mac) | mlx-audio parakeet `mlx-community/parakeet-tdt-0.6b-v2` | parakeet-mlx (fallback only) |
 | LLM (Mac) | mlx-lm, `mlx-community/Qwen3.5-9B-MLX-4bit` (32 GB+) or `-4B-` (16 GB; the default below 32 GB), `enable_thinking=False`, in the daemon's worker process | Ollama or any model server |

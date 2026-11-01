@@ -9,8 +9,8 @@ import pytest
 from ai_phone.services.backends.fake import FakeLLM, FakeTTS
 from ai_phone.services.client import WorkerClient
 from ai_phone.services.errors import BrainError
-from ai_phone.services.ipc import STT_IN_FRAME, TTS_OUT_FRAME, tag_frame, untag_frame
-from ai_phone.telephony.rings import FRAME_BYTES, FrameRing
+from ai_phone.services.ipc import STT_IN_FRAME, tag_frame, tts_out_frame_bytes, untag_frame
+from ai_phone.telephony.rings import FrameRing
 
 
 async def _collect(client, until_ev, gen, timeout=10.0):
@@ -60,11 +60,13 @@ async def test_cancel_drops_stale_generation():
 
 
 @pytest.mark.asyncio
-async def test_tts_worker_writes_frames_to_ring():
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+async def test_tts_worker_writes_frames_to_ring(output_rate):
     loop = asyncio.get_running_loop()
-    out = FrameRing(None, 200, frame_bytes=TTS_OUT_FRAME)
+    out = FrameRing(None, 200, frame_bytes=tts_out_frame_bytes(output_rate))
     try:
-        c = WorkerClient("tts", "ai_phone.services.backends.fake:FakeTTS", loop, None, out, {})
+        c = WorkerClient("tts", "ai_phone.services.backends.fake:FakeTTS", loop, None, out, {},
+                         factory_args={"output_rate": output_rate})
         await c.start()
         gen = c.next_gen()
         c.send({"op": "tts.synth", "gen": gen, "seq": 0, "text": "Hello there."})
@@ -72,7 +74,8 @@ async def test_tts_worker_writes_frames_to_ring():
         n = sum(e["nframes"] for e in evs if e["ev"] == "chunk")
         assert n == 25 and out.available() == 25
         g, payload = untag_frame(out.pop())
-        assert g == gen and len(payload) == FRAME_BYTES and payload != bytes(FRAME_BYTES)
+        frame_bytes = output_rate // 50 * 2
+        assert g == gen and len(payload) == frame_bytes and payload != bytes(frame_bytes)
         await c.stop()
     finally:
         out.close()
@@ -81,8 +84,8 @@ async def test_tts_worker_writes_frames_to_ring():
 
 class OrderedTTS(FakeTTS):
     """Immediate numbered frames make loss, reordering and generator cleanup observable across the pipe."""
-    def __init__(self, closed_path=None):
-        super().__init__()
+    def __init__(self, closed_path=None, output_rate=16000):
+        super().__init__(output_rate=output_rate)
         self.closed_path = closed_path
 
     def stream(self, gen_id, seq, text):
@@ -90,7 +93,7 @@ class OrderedTTS(FakeTTS):
             for i in range(int(text)):
                 if gen_id in self._cancelled:
                     return
-                yield (i + 1).to_bytes(2, "little") * 320
+                yield (i + 1).to_bytes(2, "little") * (self.output_rate // 50)
         finally:
             if self.closed_path:
                 with Path(self.closed_path).open("a") as f:
@@ -119,15 +122,17 @@ async def _read_speech(client, ring, gen, *, delay=0.01):
 
 
 @pytest.mark.asyncio
-async def test_fast_tts_waits_for_small_ring_without_losing_or_reordering_frames():
-    ring = FrameRing(None, 2, frame_bytes=TTS_OUT_FRAME)  # smaller than a normal five-frame chunk notification
-    c = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {})
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+async def test_fast_tts_waits_for_small_ring_without_losing_or_reordering_frames(output_rate):
+    ring = FrameRing(None, 2, frame_bytes=tts_out_frame_bytes(output_rate))  # smaller than a normal five-frame chunk notification
+    c = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {},
+                     factory_args={"output_rate": output_rate})
     try:
         await c.start()
         gen = c.next_gen()
         c.send({"op": "tts.synth", "gen": gen, "seq": 0, "text": "40"})
         frames, announced = await asyncio.wait_for(_read_speech(c, ring, gen), 8)
-        assert frames == [(i + 1).to_bytes(2, "little") * 320 for i in range(40)]
+        assert frames == [(i + 1).to_bytes(2, "little") * (output_rate // 50) for i in range(40)]
         assert announced == 40 and ring.overruns == 0
     finally:
         await c.stop()
@@ -136,11 +141,12 @@ async def test_fast_tts_waits_for_small_ring_without_losing_or_reordering_frames
 
 
 @pytest.mark.asyncio
-async def test_cancel_while_tts_ring_is_full_closes_generator_and_allows_next_generation(tmp_path):
-    ring = FrameRing(None, 2, frame_bytes=TTS_OUT_FRAME)
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+async def test_cancel_while_tts_ring_is_full_closes_generator_and_allows_next_generation(tmp_path, output_rate):
+    ring = FrameRing(None, 2, frame_bytes=tts_out_frame_bytes(output_rate))
     closed = tmp_path / "closed"
     c = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {},
-                     factory_args={"closed_path": str(closed)})
+                     factory_args={"closed_path": str(closed), "output_rate": output_rate})
     try:
         await c.start()
         gen = c.next_gen()
@@ -157,7 +163,7 @@ async def test_cancel_while_tts_ring_is_full_closes_generator_and_allows_next_ge
         new_gen = c.next_gen()
         c.send({"op": "tts.synth", "gen": new_gen, "seq": 0, "text": "6"})
         frames, _ = await _read_speech(c, ring, new_gen)
-        assert frames == [(i + 1).to_bytes(2, "little") * 320 for i in range(6)]
+        assert frames == [(i + 1).to_bytes(2, "little") * (output_rate // 50) for i in range(6)]
         assert closed.read_text().splitlines() == [str(gen), str(new_gen)]
     finally:
         await c.stop()
@@ -166,11 +172,12 @@ async def test_cancel_while_tts_ring_is_full_closes_generator_and_allows_next_ge
 
 
 @pytest.mark.asyncio
-async def test_shutdown_while_tts_ring_is_full_exits_without_forced_kill(tmp_path):
-    ring = FrameRing(None, 2, frame_bytes=TTS_OUT_FRAME)
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+async def test_shutdown_while_tts_ring_is_full_exits_without_forced_kill(tmp_path, output_rate):
+    ring = FrameRing(None, 2, frame_bytes=tts_out_frame_bytes(output_rate))
     closed = tmp_path / "closed"
     c = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {},
-                     factory_args={"closed_path": str(closed)})
+                     factory_args={"closed_path": str(closed), "output_rate": output_rate})
     try:
         await c.start()
         gen = c.next_gen()
@@ -184,6 +191,22 @@ async def test_shutdown_while_tts_ring_is_full_exits_without_forced_kill(tmp_pat
     finally:
         if c._proc is not None and c._proc.is_alive():
             await c.stop()
+        ring.close()
+        ring.unlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ring_rate, backend_rate", [(16000, 48000), (48000, 16000)])
+async def test_tts_worker_refuses_mismatched_audio_geometry_before_synthesis(ring_rate, backend_rate):
+    ring = FrameRing(None, 2, frame_bytes=tts_out_frame_bytes(ring_rate))
+    client = WorkerClient("tts", "ai_phone.services.backends.fake:FakeTTS", asyncio.get_running_loop(),
+                          None, ring, {}, factory_args={"output_rate": backend_rate})
+    try:
+        with pytest.raises(RuntimeError, match="byte frames, caller expected"):
+            await asyncio.wait_for(client.start(), 5)
+        assert ring.available() == 0
+    finally:
+        await client.stop()
         ring.close()
         ring.unlink()
 

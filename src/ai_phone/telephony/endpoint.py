@@ -1,4 +1,4 @@
-"""PJSIP endpoint lifecycle: transports from sip.bind, null audio device, G.711-only codecs, one Account per line."""
+"""PJSIP endpoint lifecycle: transports, null audio device, configured codecs, one Account per line."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from ai_phone.config import AOR_RE, DISPLAY_RE, E164_RE, SIP_URI_RE, SIP_USER_RE, Config, LineConfig, host_of, tls_proxy_hostname
 from ai_phone.telephony import events as ev
 from ai_phone.telephony.call import AiCall, LineAccount
-from ai_phone.telephony.media_port import RingMediaPort
+from ai_phone.telephony.media_port import ReceiveMediaPort, RingMediaPort
 from ai_phone.telephony.pj import pj
 from ai_phone.telephony.policy import PeerSet, build_peer_set
 from ai_phone.telephony.rings import FrameRing
@@ -228,6 +228,7 @@ class Telephony:
         self.echo_mode = echo_mode
         self.ep: pj.Endpoint | None = None
         self.port: RingMediaPort | None = None
+        self.receive_port: ReceiveMediaPort | RingMediaPort | None = None
         self.accounts: dict[str, LineAccount] = {}
         self.transport_ids: dict[str, int] = {}
         self.line_transport_ids: dict[str, int] = {}
@@ -267,6 +268,13 @@ class Telephony:
 
     # ---- start --------------------------------------------------------------------------------
     def start(self) -> None:
+        if self.echo_mode and self.cfg.playback_rate != 16000:
+            raise ValueError("the diagnostic echo mode requires 16 kHz playback; remove opus from codecs")
+        if "opus" in self.cfg.codecs:
+            version = getattr(pj, "ai_phone_opus_version", None)
+            if (not callable(version) or version() != 1
+                    or not callable(getattr(pj, "ai_phone_enable_opus", None))):
+                raise RuntimeError("Opus requires a rebuilt native binding; run ./scripts/install.sh from the ai-phone checkout")
         verified_hosts = {}
         for line in self.lines:
             hostname = tls_proxy_hostname(line, f"line {line.id}")
@@ -293,7 +301,7 @@ class Telephony:
     def _start_endpoint(self, ep: AiEndpoint, verified_hosts: dict[str, str]) -> None:
         ec = pj.EpConfig()
         ec.uaConfig.threadCnt = 1
-        ec.medConfig.clockRate = ec.medConfig.sndClockRate = 16000
+        ec.medConfig.clockRate = ec.medConfig.sndClockRate = self.cfg.playback_rate
         ec.medConfig.audioFramePtime = 20
         ec.medConfig.ecTailLen = 0
         ec.medConfig.noVad = True
@@ -304,6 +312,10 @@ class Telephony:
         for ns in (s.nameservers or _system_resolvers()):
             ec.uaConfig.nameserver.append(ns)
         ep.libInit(ec)
+        if "opus" in self.cfg.codecs:
+            status = pj.ai_phone_enable_opus()
+            if status != 0:
+                raise RuntimeError(f"could not initialize Opus (PJSIP status {status})")
         ep.audDevManager().setNullDev()
         pj.ai_phone_set_keepalive(s.tcp_keepalive_sec, s.tcp_keepalive_sec)
         self.transport_ids["udp"] = ep.transportCreate(pj.PJSIP_TRANSPORT_UDP, self._tc(s.bind.udp_port))
@@ -322,16 +334,32 @@ class Telephony:
                                    f"(PJSIP status {-transport_id}); no fallback was used")
             self.line_transport_ids[line_id] = transport_id
         ep.libStart()
-        wanted = tuple(f"{c}/8000" for c in self.cfg.codecs)
-        for ci in ep.codecEnum2():
-            ep.codecSetPriority(ci.codecId, 255 if ci.codecId.startswith(wanted) else 0)
-        self.port = RingMediaPort(self.rx, self.tx, echo=self.echo_mode)
+        self._configure_codecs(ep)
+        if self.cfg.playback_rate == 16000:
+            self.port = RingMediaPort(self.rx, self.tx, echo=self.echo_mode)
+            self.receive_port = self.port
+        else:
+            self.port = RingMediaPort(None, self.tx, sample_rate=self.cfg.playback_rate)
+            self.receive_port = ReceiveMediaPort(self.rx)
         for spec in self.lines:
             peers = self._peers_for(spec)
             acc = LineAccount(self, spec, peers)
             acc.create(self._account_config(spec))
             self.accounts[spec.id] = acc
             log.info("line %s: %s %s transport=%s policy=%s", spec.id, spec.kind, spec.number or spec.aor, spec.transport, spec.accept_invites_from)
+
+    def _configure_codecs(self, ep) -> None:
+        prefixes = {"PCMU": "PCMU/8000/", "PCMA": "PCMA/8000/", "G722": "G722/16000/", "opus": "opus/48000/"}
+        available = ep.codecEnum2()
+        codecs = [str(c.codecId) for c in available]
+        priorities = {}
+        for index, name in enumerate(self.cfg.codecs):
+            matches = [codec for codec in codecs if codec.startswith(prefixes[name])]
+            if not matches:
+                raise RuntimeError(f"configured codec {name} is unavailable; rebuild with ./scripts/install.sh")
+            priorities.update({codec: 254 - index for codec in matches})
+        for codec in codecs:
+            ep.codecSetPriority(codec, priorities.get(codec, 0))
 
     def _tls_config(self, port: int) -> "pj.TransportConfig":
         import certifi
@@ -506,10 +534,11 @@ class Telephony:
                 except Exception:
                     pass
             self.accounts = {}
-            if self.port is not None:
+            if self.port is not None or self.receive_port is not None:
                 # Stop and join the null-device media clock while its Python callback target
                 # and rings are still owned. If this fails, retain them and the endpoint.
                 self.ep.audDevManager().setNoDev()
+            self.receive_port = None
             self.port = None
             self.ep.libDestroy()
             self.ep = None

@@ -1,4 +1,4 @@
-"""Phonon-31M via direct MLX, streamed as 16 kHz int16 20 ms frames."""
+"""Phonon-31M via direct MLX, streamed as int16 20 ms playback frames."""
 from __future__ import annotations
 
 import time
@@ -13,12 +13,16 @@ class PhononTTS:
     native_rate = 24000
     LEAD_IN_THRESHOLD = 200
 
-    def __init__(self, model_id: str = models.PHONON, voice: str = voices.PHONON_DEFAULT, speed: float = 1.0):
+    def __init__(self, model_id: str = models.PHONON, voice: str = voices.PHONON_DEFAULT, speed: float = 1.0,
+                 output_rate: int = 16000):
         if model_id != models.PHONON:
             raise ValueError("Phonon requires the pinned gradium/phonon-31m-en model")
         if voice != voices.PHONON_DEFAULT or speed != 1.0:
             raise ValueError("Phonon requires voice='default' and speed=1.0")
+        if type(output_rate) is not int or output_rate not in (16000, 48000):
+            raise ValueError("playback rate must be 16000 or 48000 Hz")
         self.model_id, self.voice, self.speed = model_id, voice, speed
+        self.output_rate = output_rate
         self._model = None
         self._mx = None
         self._voice_ref = None
@@ -60,7 +64,7 @@ class PhononTTS:
     def stream(self, gen_id: int, seq: int, text: str):
         if gen_id in self._cancelled:
             return
-        framer = Framer(self.native_rate)
+        framer = Framer(self.native_rate, self.output_rate)
         t0 = time.monotonic_ns()
         first = None
         speech_started = False

@@ -78,4 +78,5 @@ jobs:
           tests/integration/test_call_ending.py
           tests/integration/test_tls_verification.py
           tests/integration/test_tls_endpoint.py
+          tests/integration/test_fullband_audio.py
           -q
