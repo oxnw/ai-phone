@@ -2,14 +2,13 @@
 # Confirmed API (mlx-audio 0.5.x, mlx-lm 0.31.3): mlx_audio.tts.utils.load_model / .stt.utils.load_model;
 # tts.generate(text=, voice=, speed=, lang_code=) yields results with .audio (24 kHz float32);
 # stt.generate(mx.array 16 kHz float32) -> result with .text (numpy input fails: it calls .astype(mx.bfloat16)); mlx_lm.load / stream_generate(... prompt_cache=) yields .text.
-import os, sys, time, json, statistics, socket, platform
+import os, sys, time, json, statistics
 os.environ.setdefault("HF_HUB_OFFLINE", "1"); os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 import numpy as np, soxr
 import mlx.core as mx
 
 LLM_ID = sys.argv[1] if len(sys.argv) > 1 else "mlx-community/Qwen3.5-9B-MLX-4bit"
-SYSTEM = (f"You are ai-phone, a phone assistant running locally on {socket.gethostname()} "
-          f"({platform.machine()}, Apple M5 Pro). Answer in one short sentence.")
+SYSTEM = "You are ai-phone, a phone assistant running locally. Answer in one short sentence."
 CLAUSE_PUNCT = set(".!?,;:")
 def ms(a, b): return (b - a) / 1e6
 def to_np(x): return np.array(mx.array(x).astype(mx.float32)).reshape(-1)   # bf16-safe
