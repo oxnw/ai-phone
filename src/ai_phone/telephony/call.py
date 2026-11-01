@@ -83,8 +83,13 @@ class AiCall(pj.Call):
     def _connect_media(self, index: int) -> None:
         am = self.getAudioMedia(index)
         port = self.acc.telephony.port
-        am.startTransmit(port)
+        am.startTransmit(self.acc.telephony.receive_port)
         port.startTransmit(am)
+        info = self.getStreamInfo(index)
+        codec, rate = str(info.codecName), int(info.codecClockRate)
+        # Logging handlers can block; only the asyncio thread writes the codec report.
+        self.acc.loop.call_soon_threadsafe(log.info, "media line=%s codec=%s rate=%d",
+                                           self.acc.line_id, codec, rate)
         self.media_connected = True
         _post(self.acc.loop, self.acc.events, ev.MediaActive(self.getId(), self.acc.line_id))
 

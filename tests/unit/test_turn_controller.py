@@ -9,7 +9,7 @@ from ai_phone.pipeline.timing import TurnTimer
 from ai_phone.pipeline.turn import TurnController
 from ai_phone.pipeline.vad import Endpointer, EnergyVad
 from ai_phone.services.client import WorkerClient
-from ai_phone.services.ipc import STT_IN_FRAME, TTS_OUT_FRAME, tag_frame, untag_frame
+from ai_phone.services.ipc import STT_IN_FRAME, TTS_OUT_FRAME, tag_frame, tts_out_frame_bytes, untag_frame
 from ai_phone.telephony.rings import FRAME_BYTES, SILENCE, FrameRing
 
 
@@ -43,11 +43,12 @@ class IdleWorker:
         pass
 
 
-@pytest.fixture
-def small_buffers():
-    rx, tx = FrameRing(None, 2), FrameRing(None, 2)
+@pytest.fixture(params=[16000, 48000])
+def small_buffers(request):
+    rate = request.param
+    rx, tx = FrameRing(None, 2), FrameRing(None, 2, frame_bytes=rate // 50 * 2)
     stt_in = FrameRing(None, 2, frame_bytes=STT_IN_FRAME)
-    tts_out = FrameRing(None, 10, frame_bytes=TTS_OUT_FRAME)
+    tts_out = FrameRing(None, 10, frame_bytes=tts_out_frame_bytes(rate))
     workers = [IdleWorker() for _ in range(3)]
     turns = []
     tc = TurnController(ConversationConfig(), StubPort(tx), *workers, rx, tx, stt_in, tts_out,
@@ -61,7 +62,7 @@ def small_buffers():
 def test_playback_full_keeps_tts_frames_in_order_without_overruns(small_buffers):
     tc, _ = small_buffers
     tc.state = "SPEAKING"
-    frames = [(i + 1).to_bytes(2, "little") * 320 for i in range(8)]
+    frames = [(i + 1).to_bytes(2, "little") * (tc.tx.frame_bytes // 2) for i in range(8)]
     for frame in frames:
         tc.tts_out.push(tag_frame(0, frame))
     tc._pump_tts_out()
@@ -78,7 +79,7 @@ def test_playback_full_keeps_tts_frames_in_order_without_overruns(small_buffers)
 def test_stale_pending_audio_is_discarded_even_while_playback_is_full(small_buffers):
     tc, _ = small_buffers
     tc.state = "SPEAKING"
-    old, new = b"\x01\x00" * 320, b"\x02\x00" * 320
+    old, new = b"\x01\x00" * (tc.tx.frame_bytes // 2), b"\x02\x00" * (tc.tx.frame_bytes // 2)
     tc.tx.push(old)
     tc.tx.push(old)
     tc.tts_out.push(tag_frame(0, old))
@@ -105,7 +106,7 @@ async def test_done_waits_until_all_buffered_tts_has_played(small_buffers):
         tc.timer = TurnTimer(gen=tc.tts.current_gen)
         tc._seq, tc._tts_done_seq, tc._llm_done = 1, 0, True
         tc._reply_parts = ["Complete reply."]
-        frames = [(i + 1).to_bytes(2, "little") * 320 for i in range(8)]
+        frames = [(i + 1).to_bytes(2, "little") * (tc.tx.frame_bytes // 2) for i in range(8)]
         for frame in frames:
             tc.tts_out.push(tag_frame(tc.tts.current_gen, frame))
         heard = []
@@ -124,7 +125,7 @@ async def test_done_waits_until_all_buffered_tts_has_played(small_buffers):
 @pytest.mark.asyncio
 async def test_long_cached_greeting_waits_for_playback_capacity(small_buffers):
     tc, _ = small_buffers
-    tc.greeting = [(i + 1).to_bytes(2, "little") * 320 for i in range(8)]
+    tc.greeting = [(i + 1).to_bytes(2, "little") * (tc.tx.frame_bytes // 2) for i in range(8)]
     stop = asyncio.Event()
     runner = asyncio.create_task(tc.run(stop))
     try:
@@ -143,7 +144,7 @@ async def test_long_cached_greeting_waits_for_playback_capacity(small_buffers):
 
 def test_interrupt_discards_cached_audio_waiting_for_capacity(small_buffers):
     tc, _ = small_buffers
-    tc._queue_cached([b"\x01\x00" * 320] * 8)
+    tc._queue_cached([b"\x01\x00" * (tc.tx.frame_bytes // 2)] * 8)
     assert tc._after_flush
     tc._flush_tx()
     tc._push_after_flush()
@@ -152,7 +153,7 @@ def test_interrupt_discards_cached_audio_waiting_for_capacity(small_buffers):
 
 def test_held_model_opening_replays_in_order_through_small_playback_ring(small_buffers):
     tc, _ = small_buffers
-    frames = [(i + 1).to_bytes(2, "little") * 320 for i in range(8)]
+    frames = [(i + 1).to_bytes(2, "little") * (tc.tx.frame_bytes // 2) for i in range(8)]
     tc.state, tc._opening_pending = "OUTBOUND_OPENING", True
     tc._held = list(frames)
     tc.timer = TurnTimer(gen=0)

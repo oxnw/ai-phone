@@ -10,20 +10,22 @@ from ai_phone.telephony.endpoint import LineSpec
 
 
 @pytest.mark.asyncio
-async def test_caching_a_phrase_larger_than_the_worker_ring_drains_during_generation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+async def test_caching_a_phrase_larger_than_the_worker_ring_drains_during_generation(tmp_path, monkeypatch, output_rate):
     from ai_phone.services.client import WorkerClient
-    from ai_phone.services.ipc import TTS_OUT_FRAME
+    from ai_phone.services.ipc import tts_out_frame_bytes
     from ai_phone.telephony.rings import FrameRing
     from tests.unit.test_worker_ipc import ORDERED_TTS
 
     monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path))
-    ring = FrameRing(None, 2, frame_bytes=TTS_OUT_FRAME)
-    tts = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {})
+    ring = FrameRing(None, 2, frame_bytes=tts_out_frame_bytes(output_rate))
+    tts = WorkerClient("tts", ORDERED_TTS, asyncio.get_running_loop(), None, ring, {},
+                       factory_args={"output_rate": output_rate})
     try:
         await tts.start()
         daemon = Daemon(Config(), "t4", tmp_path, lan=True, fake=True)
         frames = await asyncio.wait_for(daemon._cache_phrase(tts, ring, "40"), 5)
-        assert frames == [(i + 1).to_bytes(2, "little") * 320 for i in range(40)]
+        assert frames == [(i + 1).to_bytes(2, "little") * (output_rate // 50) for i in range(40)]
         assert ring.overruns == 0 and ring.available() == 0
     finally:
         await tts.stop()
@@ -641,6 +643,26 @@ async def test_run_call_logs_turns_with_the_call_and_mode_and_finishes_the_recor
 
 
 @pytest.mark.asyncio
+async def test_rtp_watchdog_reads_the_receive_port_when_playback_is_separate(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ai_phone import daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "TurnController", FakeTC)
+    monkeypatch.setattr(FakeTC, "script", "agent")
+    d, tel = daemon(tmp_path, monkeypatch), CallTel()
+    tel.port = SimpleNamespace(last_rx_ns=11)
+    tel.receive_port = SimpleNamespace(last_rx_ns=22)
+    rec = d.calls.new("agent", "out", "agents", "sip:x@127.0.0.1", "Say hello.")
+    rec.pj_call_id = 7
+    await asyncio.wait_for(d._run_call(rec, run_ctx(tel)), 2)
+    received_at = FakeTC.last.kw["rtp_last_rx_ns"]
+    assert received_at() == 22
+    tel.receive_port.last_rx_ns = 33
+    assert received_at() == 33
+
+
+@pytest.mark.asyncio
 async def test_run_call_on_an_inbound_relay_call_feeds_listen_and_ends_when_they_hang_up(tmp_path, monkeypatch):
     from ai_phone import daemon as daemon_mod
     from ai_phone.pipeline import prompts
@@ -997,26 +1019,32 @@ def test_the_llm_worker_runs_the_model_the_tier_names(tmp_path, monkeypatch):
     ("phonon", "default", "ai_phone.services.backends.mlx_phonon:PhononTTS"),
 ])
 @pytest.mark.parametrize("fake", [False, True])
-def test_daemon_selects_the_configured_speech_backend(tmp_path, monkeypatch, engine, voice, factory, fake):
+@pytest.mark.parametrize("codecs, output_rate", [(["PCMU", "PCMA"], 16000), (["opus", "G722", "PCMU", "PCMA"], 48000)])
+def test_daemon_selects_the_configured_speech_backend(tmp_path, monkeypatch, engine, voice, factory, fake, codecs, output_rate):
     import ai_phone.daemon
     from ai_phone.config import TtsConfig
 
     made = []
+    rings = {}
 
     class Recorder:
         def __init__(self, name, factory, *args, **kwargs):
             made.append((name, factory, kwargs.get("factory_args")))
+            # args: loop, audio_in, audio_out, warm_args. Capture geometry before cleanup.
+            rings[name] = tuple(r.frame_bytes if r is not None else None for r in args[1:3])
 
         async def start(self):
             raise RuntimeError("workers selected")
 
     monkeypatch.setenv("AI_PHONE_HOME", str(tmp_path))
     monkeypatch.setattr(ai_phone.daemon, "WorkerClient", Recorder)
-    cfg = Config(tts=TtsConfig(engine=engine, voice=voice))
+    cfg = Config(tts=TtsConfig(engine=engine, voice=voice), codecs=codecs)
     with pytest.raises(SystemExit):
         asyncio.run(Daemon(cfg, "t4", tmp_path, lan=True, fake=fake).run())
     assert ("tts", "ai_phone.services.backends.fake:FakeTTS" if fake else factory,
-            None if fake else {"voice": voice, "speed": 1.0}) in made
+            {"output_rate": output_rate} if fake else {"voice": voice, "speed": 1.0, "output_rate": output_rate}) in made
+    assert rings["stt"] == (1028, None)
+    assert rings["tts"] == (None, 4 + output_rate // 50 * 2)
 
 
 @pytest.mark.asyncio

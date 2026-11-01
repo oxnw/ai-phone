@@ -122,8 +122,11 @@ CFG = ('inbound:\n  greeting: "Hi."\n  instructions: "s"\n'
        'conversation:\n  endpoint_silence_ms: 300\nlog:\n  dir: "%s"\n')
 
 
-def test_daemon_answers_and_logs_a_turn_with_fake_backends(tmp_path: Path):
-    d, lines = _start_daemon(tmp_path, CFG % tmp_path)
+@pytest.mark.parametrize("codecs", ["[PCMU, PCMA]", "[opus, G722, PCMU, PCMA]"])
+def test_daemon_answers_and_logs_a_turn_with_fake_backends(tmp_path: Path, codecs):
+    # The independent pjsua peer uses PCMU: the Opus offer exercises 48 kHz
+    # worker output, cached greeting and playback through negotiated fallback.
+    d, lines = _start_daemon(tmp_path, f"codecs: {codecs}\n" + CFG % tmp_path)
     try:
         recs = _call_and_wait(d, lines, tmp_path, turns=1)
         assert recs[0]["reply_text"] == "Hello, this is a fake reply." and recs[0]["first_audible_ms"] is not None

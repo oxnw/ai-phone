@@ -1,4 +1,4 @@
-"""Kokoro-82M via mlx-audio, emitting 16 kHz 640-byte frames (resampled from Kokoro's native 24 kHz)."""
+"""Kokoro-82M via mlx-audio, emitting 20 ms playback frames from native 24 kHz speech."""
 from __future__ import annotations
 
 import time
@@ -10,8 +10,12 @@ from ai_phone.pipeline.audio_out import Framer
 
 
 class KokoroTTS:
-    def __init__(self, model_id: str = "mlx-community/Kokoro-82M-bf16", voice: str = "af_heart", speed: float = 1.0):
+    def __init__(self, model_id: str = "mlx-community/Kokoro-82M-bf16", voice: str = "af_heart", speed: float = 1.0,
+                 output_rate: int = 16000):
+        if type(output_rate) is not int or output_rate not in (16000, 48000):
+            raise ValueError("playback rate must be 16000 or 48000 Hz")
         self.model_id, self.voice, self.speed = model_id, voice, speed
+        self.output_rate = output_rate
         self._voice_ref = voice
         self._model = None
         self._mx = None
@@ -47,7 +51,7 @@ class KokoroTTS:
     LEAD_IN_THRESHOLD = 200  # int16 units; Kokoro starts every utterance with ~200 ms of digital silence
 
     def stream(self, gen_id: int, seq: int, text: str):
-        framer = Framer(24000)
+        framer = Framer(24000, self.output_rate)
         t0 = time.monotonic_ns()
         first = None
         speech_started = False

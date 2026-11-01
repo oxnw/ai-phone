@@ -18,6 +18,8 @@ def build(tmp_path):
     project.mkdir()
     script = project / "build.sh"
     shutil.copyfile(SCRIPT, script)
+    for name in ("pjproject-opus.c", "pjproject-opus.c.sha256"):
+        shutil.copyfile(SCRIPT.parent / name, project / name)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     kegs = tmp_path / "kegs"
@@ -55,12 +57,16 @@ elif name == "pkg-config":
         print("-DPJ_TEST")
     elif args == ["--static", "--libs", "libpjproject"]:
         print("-lpjsua2 -lssl -lcrypto -lopus")
+    elif args == ["--cflags", "opus"]:
+        print("-DOPUS_TEST")
+    elif args == ["--libs", "opus"]:
+        print("-lopus")
     else:
         raise AssertionError(args)
-elif name not in {"swig", "clang++"}:
+elif name not in {"swig", "clang", "clang++"}:
     raise AssertionError(name)
 '''
-    for name in ("brew", "pkg-config", "swig", "clang++"):
+    for name in ("brew", "pkg-config", "swig", "clang", "clang++"):
         path = bin_dir / name
         path.write_text(stub)
         path.chmod(0o755)
@@ -88,6 +94,8 @@ def test_uses_the_installed_pjproject_openssl_when_both_majors_exist(build, majo
     assert f"-I{kegs}/openssl@{major}/include" in compiler["args"]
     assert f"-I{kegs}/openssl@{7 - major}/include" not in compiler["args"]
     assert "tls_verify.cpp" in compiler["args"]
+    assert "opus_support.cpp" in compiler["args"]
+    assert "build/opus_factory.o" in compiler["args"]
     assert "-I." in compiler["args"]
     assert compiler["args"].index(selected) < compiler["args"].index("-lssl")
     assert f"-L{kegs}/opus/lib" in compiler["args"]
@@ -96,6 +104,10 @@ def test_uses_the_installed_pjproject_openssl_when_both_majors_exist(build, majo
     assert config_path[0] == str(kegs / "pjproject" / "lib" / "pkgconfig")
     assert str(kegs / f"openssl@{major}" / "lib" / "pkgconfig") in config_path
     assert str(kegs / f"openssl@{7 - major}" / "lib" / "pkgconfig") not in config_path
+    adapter = next(call for call in calls if call["tool"] == "clang")
+    assert "-c" in adapter["args"] and "opus_factory.c" in adapter["args"]
+    assert "-DOPUS_TEST" in adapter["args"]
+    assert f"-I{kegs}/opus/include" in adapter["args"]
 
 
 def test_missing_recorded_dependency_stops_before_building_instead_of_using_other_ssl(build):
@@ -113,3 +125,41 @@ def test_dependency_lookup_failure_stops_before_building(build):
     assert result.returncode != 0
     assert "could not read pjproject's installed dependencies" in result.stderr
     assert not any(call["tool"] in {"swig", "clang++"} for call in calls)
+
+
+def test_missing_opus_gives_install_guidance_before_building(build):
+    run, kegs = build
+    shutil.rmtree(kegs / "opus")
+    result, calls = run()
+    assert result.returncode != 0
+    assert "opus is not installed; run brew install opus" in result.stderr
+    assert not any(call["tool"] in {"swig", "clang", "clang++"} for call in calls)
+
+
+def test_modified_bundled_codec_is_not_compiled(build):
+    run, kegs = build
+    (kegs.parent / "native/pjproject-opus.c").write_text("modified source\n")
+    result, calls = run()
+    assert result.returncode != 0
+    assert "bundled Opus adapter checksum does not match" in result.stderr
+    assert not any(call["tool"] in {"swig", "clang", "clang++"} for call in calls)
+
+
+@pytest.mark.parametrize("builtin", [0, 1])
+def test_factory_wrapper_avoids_duplicate_symbols_when_pjproject_has_opus(tmp_path, builtin):
+    """Preprocess against synthetic headers; never build or load a native library."""
+    compiler = shutil.which("clang")
+    if compiler is None:
+        pytest.skip("C preprocessor unavailable")
+    header = tmp_path / "pjmedia-codec/config.h"
+    header.parent.mkdir()
+    header.write_text(f"#define PJMEDIA_HAS_OPUS_CODEC {builtin}\n"
+                      "#define PJ_VERSION_NUM_MAJOR 2\n#define PJ_VERSION_NUM_MINOR 17\n")
+    shutil.copyfile(SCRIPT.parent / "opus_factory.c", tmp_path / "opus_factory.c")
+    (tmp_path / "pjproject-opus.c").write_text(
+        "#if PJMEDIA_HAS_OPUS_CODEC != 1\n#error adapter not enabled\n#endif\n"
+        "int bundled_factory_marker;\n")
+    result = subprocess.run([compiler, "-E", "-P", "-I", str(tmp_path), str(tmp_path / "opus_factory.c")],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert ("bundled_factory_marker" in result.stdout) is (not builtin)
