@@ -15,7 +15,7 @@ import numpy as np
 
 from ai_phone.services import ipc
 from ai_phone.services.errors import BrainError
-from ai_phone.services.ipc import STT_IN_FRAME, TTS_OUT_FRAME, tag_frame, untag_frame
+from ai_phone.services.ipc import STT_IN_FRAME, tag_frame, tts_out_frame_bytes, untag_frame
 from ai_phone.telephony.rings import FrameRing
 
 
@@ -151,12 +151,14 @@ def run_worker(kind: str, backend_factory: str, conn, audio_in_name, audio_out_n
     from ai_phone.services.client import is_secret_env
     for name in [n for n in os.environ if is_secret_env(n)]:
         del os.environ[name]  # belt and braces: a worker never holds a key, token or password, whatever the parent exported
-    ain = FrameRing.attach(audio_in_name, frame_bytes=STT_IN_FRAME if kind == "stt" else 640) if audio_in_name else None
-    aout = FrameRing.attach(audio_out_name, frame_bytes=TTS_OUT_FRAME if kind == "tts" else 640) if audio_out_name else None
+    ain = aout = None
     cancelled: set[int] = set()
     pending: list[dict] = []  # messages read during a mid-stream cancel check, processed next
     interval = float(keep_warm_sec)  # current keep-warm cadence (backs off while ticks are slow)
     try:
+        ain = FrameRing.attach(audio_in_name, frame_bytes=STT_IN_FRAME if kind == "stt" else 640) if audio_in_name else None
+        output_frame_bytes = tts_out_frame_bytes((factory_args or {}).get("output_rate", 16000)) if kind == "tts" else 640
+        aout = FrameRing.attach(audio_out_name, frame_bytes=output_frame_bytes) if audio_out_name else None
         backend = _load(backend_factory, factory_args)
         timings = backend.warmup(**warm_args) if warm_args else backend.warmup()
         _trim_memory(first=True)
@@ -252,3 +254,7 @@ def run_worker(kind: str, backend_factory: str, conn, audio_in_name, audio_out_n
     except Exception as e:  # report, then exit non-zero so the supervisor restarts us
         ipc.send(conn, {"ev": "error", "message": f"{e}\n{traceback.format_exc()}"})
         raise
+    finally:
+        for ring in (ain, aout):
+            if ring is not None:
+                ring.close()  # the main process owns and unlinks the shared memory

@@ -30,7 +30,7 @@ Non-goals that shape the architecture: single-call, English-only, no web UI, no 
                               │
                        SIP trunk / PBX / LAN softphone / pjsua test peer
                               │  SIP over UDP/TCP/TLS (signalling)
-                              │  RTP G.711 PCMU/PCMA, 20 ms frames (media), SRTP when offered
+                              │  RTP G.711 by default; opt-in G.722/Opus; 20 ms frames, SRTP when offered
                               ▼
  ┌──────────────────────────────────────────────────────────────────────────┐
  │  ai-phone daemon (one host, one or more lines, one call at a time)        │
@@ -117,7 +117,7 @@ transport with native handshake verification; ordinary TLS lines keep the strict
 
 Null audio device **[D][V]**: `ep.audDevManager().setNullDev()` immediately after `libInit`. Without it a headless process has no conference-bridge clock and the media port never ticks; on macOS 26 a default CoreAudio device would also trigger a microphone permission prompt. `setNullDev2(avoidClockGap=True)` **[V]** is the knob if the null device shows clock gaps under load.
 
-Codecs **[D]**: after `libStart`, enumerate with `ep.codecEnum2()` and set priority 255 for `PCMU/8000` and `PCMA/8000`, 0 for everything else (Opus, G.722, speex, iLBC, GSM). Both directions of the SDP offer then carry only G.711, so every measured number is over 8 kHz phone audio (premise 3).
+Codecs **[D, amended 2026-11-01]**: the default remains `codecs: [PCMU, PCMA]`. The ordered list may also include `G722` and `opus`; only selected codecs are enabled, with descending priorities starting at 254. `codecs: [opus, G722, PCMU, PCMA]` opts into 48 kHz playback and offers wideband/narrowband fallbacks. Opus uses the versioned native helper after `libInit`, with 48 kHz mono PCM, CBR enabled, 20 ms frames and VAD disabled. It advertises a 64 kbit/s receive limit; transmit bitrate follows peer negotiation and the upstream encoder policy. Its RTP codec ID is `opus/48000/2` even for mono PCM. G.722 uses 16 kHz PCM despite the historical 8 kHz RTP clock. A missing selected codec or old Opus binding fails startup with rebuild guidance instead of silently downgrading. A call log reports the negotiated codec and clock rate. Historical G.711 measurements remain G.711 measurements; no latency or carrier-quality improvement is inferred from codec selection.
 
 ### 3.3 Account and registration
 
@@ -201,7 +201,7 @@ fmt.clockRate = 16000; fmt.channelCount = 1; fmt.bitsPerSample = 16; fmt.frameTi
 port.createPort("ai-phone", fmt)
 ```
 
-Declaring 16 kHz costs nothing: the PJSUA conference bridge already runs at 16 kHz **[V]**, so the only resampler PJSIP inserts is on the 8 kHz G.711 stream port, which exists regardless. Every frame we see is **320 samples of int16 at 16 kHz = 640 bytes per 20 ms**.
+The default bridge and media port run at 16 kHz: inbound and outbound frames are 320 int16 samples, or 640 bytes per 20 ms. When Opus is configured, the bridge and transmit port run at 48 kHz (960 samples / 1920 bytes), while a separate receive-only port remains at 16 kHz. PJSIP performs the native conversion into that receive port. Both ports and their rings remain owned until `setNoDev()` stops the clock; both ports are released before `libDestroy()`. The diagnostic echo mode requires 16 kHz playback. The callbacks below show the default 16 kHz path; fullband transmission uses silence and frames sized to its output ring.
 
 Callbacks (PJSIP thread; keep them trivial):
 
@@ -247,7 +247,7 @@ DTMF: `onDtmfDigit` → `DtmfEvent(digit)` to the queue. Unused through launch (
                                                                                           │
                                                                         clause chunker (t3 first clause) ──▶ TTS stream (t4 first chunk)
                                                                                           │
-                                                       24→16 kHz resample ──▶ tx_ring ──▶ PJSIP ──▶ RTP (t5 first non-silent packet)
+                                                       24→16/48 kHz resample ──▶ tx_ring ──▶ PJSIP ──▶ RTP (t5 first non-silent packet)
 ```
 
 Timestamps t0…t5 are the latency record (§9). Budget: t5 − t0 ≤ 900 ms p50, gate 1000 ms.
@@ -289,7 +289,7 @@ One `TurnController` per call. Every generation carries a monotonically increasi
 
 ### 4.6 TTS, output, and cancellation
 
-- Both TTS models generate 24 kHz float32 audio. Their backends resample inside the worker to 16 kHz int16 with `soxr` (VHQ) and emit 640-byte frames. Phonon streams at an explicit 80 ms audio interval; Kokoro emits sentence chunks. Leading silent frames are trimmed. First frame pushed = t5 candidate; the actual t5 is stamped by the media port when it hands the first non-silent frame to PJSIP (a flag on the ring entry).
+- Both TTS models generate 24 kHz float32 audio. Their backends resample inside the worker with `soxr` (VHQ) to the configured playback rate: 16 kHz / 640-byte frames by default, or 48 kHz / 1920-byte frames when Opus is offered. Frames remain 20 ms and carry the same generation tag across worker IPC. Upsampling preserves available model output; it does not invent detail above the model's native bandwidth. Phonon streams at an explicit 80 ms audio interval; Kokoro emits sentence chunks. Leading silent frames are trimmed. First frame pushed = t5 candidate; the actual t5 is stamped by the media port when it hands the first non-silent frame to PJSIP (a flag on the ring entry).
 - Underrun: if `tx_ring` empties mid-utterance (TTS slower than real time), the port sends silence and increments `tx_underruns`; the latency record shows it. Persistent underrun → switch to the lighter tier (a later check command will recommend it, §7.3).
 - When speech is generated faster than playback, the TTS worker waits for space in its output ring and checks cancellation/shutdown while waiting. The pipeline transfers only what fits in `tx_ring`, preserving order and one pending tagged frame; cached greetings and other phrases also wait for playback space. Startup caching drains on chunk events, and a turn completes only after all its audio has drained. The PJSIP callback never waits for a producer.
 - **Cancellation semantics [D]**: `cancel(gen_id)` is sent to all three workers; they abandon work for that id at their next check (≤ 1 chunk). The pipeline flushes `tx_ring` immediately (the caller stops hearing us within one frame plus the phone's jitter buffer), drops any in-flight chunks whose `gen_id` is stale, and keeps the partial assistant text in history marked `[interrupted]` so the model knows what the caller heard.
@@ -302,7 +302,7 @@ While `SPEAKING`, the drain task keeps running VAD on caller audio. Trigger = **
 
 | Event | Behaviour |
 |---|---|
-| Greeting | `inbound.greeting` on an incoming call, the fixed disclosure on an outbound one (§14b.5), pre-synthesised at startup and cached as 16 kHz frames; plays within one loop iteration of `ACTIVE` |
+| Greeting | `inbound.greeting` on an incoming call, the fixed disclosure on an outbound one (§14b.5), pre-synthesised at startup and cached at the configured playback rate; plays within one loop iteration of `ACTIVE` |
 | Silence ≥ 8 s after our turn | Say the cached "Still there?" once; silence ≥ 8 s more → BYE |
 | Max duration | Cached warning at 9:30; BYE at 10:00 |
 | RTP timeout | No `onFrameReceived` for 10 s → BYE |
@@ -333,14 +333,14 @@ class LLMBackend(Protocol):
 
 class TTSBackend(Protocol):
     def warmup(self) -> Timings
-    def stream(self, gen_id: int, seq: int, text: str) -> Iterator[bytes]   # 16 kHz PCM16, 640-byte / 20 ms frames
+    def stream(self, gen_id: int, seq: int, text: str) -> Iterator[bytes]   # PCM16, 20 ms: 640 bytes at 16 kHz or 1920 at 48 kHz
     def cancel(self, gen_id: int) -> None
     native_rate: int
 ```
 
 ### 5.2 IPC **[D]**
 
-- **Audio** travels through `multiprocessing.shared_memory` rings (same layout as §3.5): main → stt-worker (utterance audio), tts-worker → main (16 kHz PCM16 / 20 ms frames tagged with the generation ID). No pickling of audio, ever.
+- **Audio** travels through `multiprocessing.shared_memory` rings (same layout as §3.5): main → stt-worker (16 kHz utterance audio), tts-worker → main (16/48 kHz PCM16 / 20 ms frames tagged with the generation ID). No pickling of audio, ever.
 - **Control** travels over a `multiprocessing.Pipe` per worker carrying newline-delimited JSON messages (small, human-readable in logs):
 
 | Direction | Message | Fields |
@@ -417,15 +417,15 @@ Resident means resident. Three things keep an idle worker's weights in RAM on a 
 
 | Hop | Rate / format | Who converts | Notes |
 |---|---|---|---|
-| Wire → PJSIP | G.711 μ/A-law, 8 kHz, 20 ms | PJSIP stream port | jitter buffer here |
-| PJSIP bridge | 16 kHz int16 | PJSIP resampler (8→16) | bridge default rate **[V]** |
-| Bridge → our port | 16 kHz int16, 320 samples/frame | none | `rx_ring` |
+| Wire → PJSIP | Default G.711 8 kHz; optional G.722 or Opus | PJSIP stream port | jitter buffer here |
+| PJSIP bridge | 16 kHz int16 by default; 48 kHz with Opus configured | PJSIP resampler | matches playback rate |
+| Bridge → receive port | 16 kHz int16, 320 samples/frame | native bridge when needed | `rx_ring` |
 | Port → VAD/STT | 16 kHz | none | VAD chunks of 512 samples |
 | TTS model → worker framing | 24 kHz float32 | none | Phonon / Kokoro native |
-| Worker → pipeline → port | 16 kHz int16 | `soxr` 24→16 in worker | `tx_ring` |
-| Port → PJSIP → wire | 8 kHz G.711 | PJSIP resampler (16→8) + codec | |
+| Worker → pipeline → transmit port | 16 or 48 kHz int16, 20 ms | `soxr` in worker | `tx_ring`, generation-tagged IPC |
+| Transmit port → PJSIP → wire | negotiated codec | native resampling when needed + codec | fallback can reduce bandwidth |
 
-Two resamples on the outbound path (24→16 in Python, 16→8 in PJSIP) and one inbound (8→16 in PJSIP). The 100 ms "transport" budget row covers all of them plus one 20 ms frame of jitter.
+The default path has two outbound resamples (24→16 in the worker, 16→8 in PJSIP) and one inbound (8→16). With Opus the worker instead supplies 48 kHz playback and the native bridge supplies 16 kHz recognition. The historical 100 ms transport budget is not a measurement of the optional fullband path.
 
 ## 7. Layer 4: Control plane
 
@@ -1231,6 +1231,7 @@ Each came out of planning or a review:
 
 | Date | Decision | Status |
 |---|---|---|
+| 2026-11-01 | Opt-in Opus uses 48 kHz playback and a separate native-resampled 16 kHz receive port. Ordered G.722/G.711 fallback; defaults remain G.711/16 kHz. Generation tags, 20 ms frames, nonblocking callbacks and one-call ownership are unchanged. This amends the original fixed transmit rate. | [D] |
 | 2026-10-27 | Add Phonon 31M English through direct MLX, with the bundled local voice and 80 ms streaming chunks. Setup selects the engine; existing configs keep Kokoro. Same framing, generation cancellation and offline worker boundary. Call latency and interruption are measured separately from the standalone TTS benchmark | [D] |
 | 2026-09-02 | Complete appliance (Approach B) with the weekend prototype as Milestone 1 inside it | [D] |
 | 2026-09-02 | Python; Go rejected by owner; TS/Swift/Rust evaluated and rejected | [D] |

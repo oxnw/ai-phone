@@ -32,22 +32,23 @@ class Speech:
             self.closed += 1
 
 
-def backend(parts):
-    tts = PhononTTS()
+def backend(parts, output_rate=16000):
+    tts = PhononTTS(output_rate=output_rate)
     tts._mx = types.SimpleNamespace(array=np.array, float32=np.float32)
     tts._model = Speech(parts)
     tts._voice_ref = "/local/default-voice.safetensors"
     return tts
 
 
-def test_stream_resamples_and_frames_chunks_including_empty_final_result():
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+def test_stream_resamples_and_frames_chunks_including_empty_final_result(output_rate):
     parts = [tone(1920), tone(1920), np.array([], np.float32)]
-    tts = backend(parts)
+    tts = backend(parts, output_rate)
     frames = list(tts.stream(1, 0, "Hello."))
-    f = Framer(24000)
+    f = Framer(24000, output_rate)
     expected = f.feed(parts[0]) + f.feed(parts[1]) + f.flush()
     assert frames == expected
-    assert frames and all(len(frame) == 640 for frame in frames)
+    assert frames and all(len(frame) == output_rate // 50 * 2 for frame in frames)
     assert tts._model.calls == [{"text": "Hello.", "voice": "/local/default-voice.safetensors",
                                  "stream": True, "streaming_interval": 0.08, "temperature": 0.3}]
     assert tts._model.closed == 1
@@ -61,8 +62,9 @@ def test_leading_silence_and_an_all_silent_resampler_tail_are_not_emitted():
     assert np.abs(np.frombuffer(frames[0], dtype="<i2").astype(np.int32)).max() >= 200
 
 
-def test_cancelled_generation_does_not_start_model_or_a_later_clause():
-    tts = backend([tone()])
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+def test_cancelled_generation_does_not_start_model_or_a_later_clause(output_rate):
+    tts = backend([tone()], output_rate)
     tts.cancel(7)
     assert list(tts.stream(7, 0, "Cancelled.")) == []
     assert list(tts.stream(7, 1, "Late queued clause.")) == []
@@ -70,10 +72,11 @@ def test_cancelled_generation_does_not_start_model_or_a_later_clause():
     assert list(tts.stream(8, 0, "New reply."))
 
 
-def test_cancel_between_frames_drops_buffered_frames_and_does_not_pull_next_chunk():
-    tts = backend([tone(), tone()])
+@pytest.mark.parametrize("output_rate", [16000, 48000])
+def test_cancel_between_frames_drops_buffered_frames_and_does_not_pull_next_chunk(output_rate):
+    tts = backend([tone(), tone()], output_rate)
     stream = tts.stream(7, 0, "A long reply.")
-    assert len(next(stream)) == 640
+    assert len(next(stream)) == output_rate // 50 * 2
     tts.cancel(7)
     assert list(stream) == []
     assert tts._model.read == 1
@@ -96,7 +99,7 @@ def test_cancel_during_resampler_tail_stops_remaining_tail(monkeypatch):
     from ai_phone.services.backends import mlx_phonon
 
     class Tail:
-        def __init__(self, rate):
+        def __init__(self, rate, output_rate):
             pass
 
         def feed(self, audio):
@@ -160,7 +163,8 @@ def test_warmup_loads_local_paths_preserves_voice_suffix_and_setup_environment(t
     assert os.environ.get("TRANSFORMERS_OFFLINE") == offline
 
 
-@pytest.mark.parametrize("kwargs", [{"voice": "af_heart"}, {"speed": 1.1}, {"model_id": "org/other"}])
+@pytest.mark.parametrize("kwargs", [{"voice": "af_heart"}, {"speed": 1.1}, {"model_id": "org/other"},
+                                    {"output_rate": 44100}, {"output_rate": 16000.0}])
 def test_unsupported_model_voice_or_speed_is_refused(kwargs):
     with pytest.raises(ValueError):
         PhononTTS(**kwargs)

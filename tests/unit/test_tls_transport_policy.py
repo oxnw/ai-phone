@@ -38,7 +38,10 @@ def harness(monkeypatch):
         def libStart(self):
             events.append("start")
         def codecEnum2(self):
-            return []
+            return [SimpleNamespace(codecId=name) for name in
+                    ("PCMU/8000/1", "PCMA/8000/1", "G722/16000/1", "opus/48000/2")]
+        def codecSetPriority(self, *args):
+            pass
         def libDestroy(self):
             events.append("destroy")
 

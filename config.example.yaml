@@ -51,6 +51,12 @@ calls:
   relay_second_filler_sec: 10  # and "Still with you, one moment." at this many seconds
   relay_reply_timeout_sec: 25  # then apologise and hang up
 
+# Ordered preferences. Defaults preserve ordinary narrowband telephone compatibility.
+# To offer fullband playback with fallback: [opus, G722, PCMU, PCMA].
+# Re-run ./scripts/install.sh for Opus support, then restart the daemon after saving.
+# Higher call quality depends on the carrier route and receiving device.
+codecs: [PCMU, PCMA]
+
 rtp:
   port_min: 10000
   port_max: 10100
