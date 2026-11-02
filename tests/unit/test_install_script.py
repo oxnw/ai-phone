@@ -24,7 +24,7 @@ def test_missing_homebrew_is_a_clear_error(tmp_path):
     assert "Homebrew is required" in r.stderr and "https://brew.sh" in r.stderr
 
 
-def _mock_install(tmp_path, *, installed=None, build_result="current"):
+def _mock_install(tmp_path, *, installed=None, installed_opus=1, build_result="current"):
     """Run only the copied installer: fake brew/uv/build, real Python for the capability probe."""
     import sys
 
@@ -41,6 +41,8 @@ def _mock_install(tmp_path, *, installed=None, build_result="current"):
     if installed is not None:
         source = ("# old importable binding without the verifier\n" if installed == "old" else
                   f"def ai_phone_tls_verifier_version():\n    return {installed}\n")
+        if installed_opus is not None:
+            source += f"def ai_phone_opus_version():\n    return {installed_opus}\n"
         (vendor / "pjsua2.py").write_text(source)
 
     def executable(path, text):
@@ -77,7 +79,7 @@ printf 'native build\n' >> "$INSTALL_TEST_LOG"
 [ "$INSTALL_TEST_BUILD_RESULT" != fail ] || exit 94
 mkdir -p native/pjsua2/build
 if [ "$INSTALL_TEST_BUILD_RESULT" = current ]; then
-  printf 'def ai_phone_tls_verifier_version():\n    return 1\n' > native/pjsua2/build/pjsua2.py
+  printf 'def ai_phone_tls_verifier_version():\n    return 1\ndef ai_phone_opus_version():\n    return 1\n' > native/pjsua2/build/pjsua2.py
 else
   printf '# importable binding still missing the capability\n' > native/pjsua2/build/pjsua2.py
 fi
@@ -98,11 +100,12 @@ printf 'placeholder native artifact\n' > native/pjsua2/build/_pjsua2_test.so
 def test_current_native_capability_skips_the_build(tmp_path):
     result, repo, calls = _mock_install(tmp_path, installed=1)
     assert result.returncode == 0, result.stderr
-    assert "already built (TLS verifier version 1)" in result.stdout
+    assert "already built (TLS verifier 1, Opus support 1)" in result.stdout
     assert "native build" not in calls
     assert not (repo / "native/pjsua2/build").exists()
     assert "==> Installing the ai-phone command" in result.stdout
     assert calls.count("launcher install\n") == 1
+    assert "brew list --formula opus" in calls
 
 
 @pytest.mark.parametrize("installed", [None, "old", 0, 2])
@@ -131,9 +134,17 @@ def test_native_build_failure_stops_before_installing_or_announcing_ready(tmp_pa
 def test_rebuilt_library_must_provide_the_required_capability(tmp_path):
     result, repo, calls = _mock_install(tmp_path, installed="old", build_result="stale")
     assert result.returncode == 1
-    assert "cannot load TLS verifier version 1" in result.stderr
+    assert "cannot load TLS verifier 1 and Opus support 1" in result.stderr
     assert "native/pjsua2/README.md" in result.stderr
     assert calls.count("native build\n") == 1
     assert (repo / "src/ai_phone/vendor/_pjsua2_test.so").is_file()
     assert "==> Installing the ai-phone command" not in result.stdout
     assert "launcher install" not in calls
+
+
+@pytest.mark.parametrize("installed_opus", [None, 0, 2])
+def test_tls_capable_binding_without_current_opus_is_rebuilt(tmp_path, installed_opus):
+    result, _, calls = _mock_install(tmp_path, installed=1, installed_opus=installed_opus)
+    assert result.returncode == 0, result.stderr
+    assert calls.count("native build\n") == 1
+    assert calls.count("launcher install\n") == 1

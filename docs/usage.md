@@ -55,6 +55,25 @@ No carrier yet? Enable receiving calls, pick "A SIP address" in setup and keep t
 
 The carrier and SIP commands are below.
 
+## Audio codecs
+
+Calls default to G.711 (`PCMU`, `PCMA`) for telephone compatibility. To offer higher-quality audio, rebuild
+with `./scripts/install.sh` from the checkout, then add this top-level setting to `~/.ai-phone/config.yaml`:
+
+```yaml
+codecs: [opus, G722, PCMU, PCMA]
+```
+
+The order sets preference. Opus enables 48 kHz playback; G.722 provides wideband fallback, followed by ordinary
+G.711. Speech recognition stays at 16 kHz. The codec must also be supported by the peer, and a carrier can
+convert audio further along the route. Negotiating Opus with a carrier does not prove fullband audio reaches
+the handset. Existing Phonon and Kokoro voices generate 24 kHz audio; higher-rate playback preserves their
+available detail but adds none above their native bandwidth. This setting does not add a Fish backend.
+
+After any active call ends, run `ai-phone stop`, then `ai-phone run` to load the saved configuration. The daemon
+logs the negotiated codec when media connects. An older binding or unavailable selected codec produces rebuild
+guidance; it is not silently ignored. To return to the default, use `codecs: [PCMU, PCMA]` and restart again.
+
 ## Numbers, forwarding and SIP
 
 ```bash

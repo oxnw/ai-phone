@@ -41,6 +41,7 @@ DNS_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 TLS_PROXY_RE = re.compile(r"sip:(?P<host>[A-Za-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?;transport=tls")
 TtsEngine = Literal["kokoro", "phonon"]
 TTS_ENGINES = typing.get_args(TtsEngine)
+SUPPORTED_CODECS = ("PCMU", "PCMA", "G722", "opus")
 
 
 @dataclass
@@ -207,6 +208,11 @@ class Config:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     log: LogConfig = field(default_factory=LogConfig)
     warnings: list[str] = field(default_factory=list, init=False, repr=False)
+
+    @property
+    def playback_rate(self) -> int:
+        """Preserve fullband output when Opus is offered; recognition remains at 16 kHz."""
+        return 48000 if "opus" in self.codecs else 16000
 
 
 # ---- structural loading ---------------------------------------------------------------------
@@ -438,8 +444,10 @@ def validate_config(cfg: Config, env: Mapping[str, str] | None = None) -> list[s
     env = os.environ if env is None else env
     warnings: list[str] = []
     _require(cfg.rtp.port_min < cfg.rtp.port_max, "config.rtp: port_min must be less than port_max")
+    _require(bool(cfg.codecs), "config.codecs: choose at least one codec")
+    _require(len(set(cfg.codecs)) == len(cfg.codecs), "config.codecs: duplicate codecs are not allowed")
     for c in cfg.codecs:
-        _require(c in ("PCMU", "PCMA"), f"config.codecs: only PCMU and PCMA are allowed, got {c}")
+        _require(c in SUPPORTED_CODECS, f"config.codecs: expected one of {list(SUPPORTED_CODECS)}, got {c}")
     b = cfg.sip.bind
     _require(b.tcp_port != b.tls_port, "config.sip.bind.tls_port: TLS cannot share the TCP port")
     for ns in cfg.sip.nameservers:

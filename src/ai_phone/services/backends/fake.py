@@ -124,17 +124,21 @@ class KeepWarmProbeSTT(FakeSTT):
 
 
 class FakeTTS:
-    def __init__(self):
+    def __init__(self, output_rate: int = 16000):
+        if type(output_rate) is not int or output_rate not in (16000, 48000):
+            raise ValueError("playback rate must be 16000 or 48000 Hz")
+        self.output_rate = output_rate
         self._cancelled: set[int] = set()
 
     def warmup(self):
         return {"warm_ms": 1.0}
 
     def stream(self, gen_id, seq, text):
+        samples_per_frame = self.output_rate // 50
         for i in range(25):
             if gen_id in self._cancelled:
                 return
-            t = (np.arange(320) + i * 320) / 16000.0
+            t = (np.arange(samples_per_frame) + i * samples_per_frame) / self.output_rate
             yield (np.sin(2 * math.pi * 440 * t) * 8000).astype("<i2").tobytes()
 
     def cancel(self, gen_id):
