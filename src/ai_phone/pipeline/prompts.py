@@ -31,9 +31,9 @@ DEFAULT_CALL_SECTION = (
 OPENING_CUE = f'(The call is connected. The other person has answered and has already heard: "{DISCLOSURE}")'
 
 
-def fixed_instructions(host_line: str | None) -> str:
-    """The cached part: the phone instructions, plus the host line for a local brain (never sent to a remote one)."""
-    return PHONE_INSTRUCTIONS + (f" {host_line}" if host_line else "")
+def fixed_instructions() -> str:
+    """The cached phone instructions. Host identity is never added to the model's context."""
+    return PHONE_INSTRUCTIONS
 
 
 def system_prompt(fixed: str, call_section: str | None) -> str:

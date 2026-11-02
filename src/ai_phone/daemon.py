@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import platform
 import signal
-import socket
 import sys
 import time
 from pathlib import Path
@@ -165,9 +163,8 @@ class Daemon:
 
     # ---- system prompt and cached phrases -------------------------------------------------------
     def fixed_prompt(self) -> str:
-        """The cached part of every call's instructions. The host line is for a local brain only."""
-        host = None if self.remote_brain else f"You are running on {socket.gethostname()} ({platform.machine()})."
-        return prompts.fixed_instructions(host)
+        """The cached phone instructions, without identifying the computer to callers."""
+        return prompts.fixed_instructions()
 
     async def _cache_phrase(self, tts: WorkerClient, ring: FrameRing, text: str) -> list[bytes]:
         gen = tts.next_gen()

@@ -45,7 +45,7 @@ def opening():
     tts_out = FrameRing(None, 100, frame_bytes=TTS_OUT_FRAME)
     workers = [RecordingWorker(kind) for kind in ("stt", "llm", "tts")]
     turns, lines = [], []
-    prompt = system_prompt(fixed_instructions(None), TASK)
+    prompt = system_prompt(fixed_instructions(), TASK)
     tc = TurnController(ConversationConfig(), StubPort(tx), *workers, rx, tx, stt_in, tts_out,
                         Endpointer(EnergyVad()), [], prompt, turns.append, opening_frames=[], direction="out",
                         generate_opening=True, on_line=lambda *line: lines.append(line))
