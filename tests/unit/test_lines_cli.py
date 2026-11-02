@@ -141,6 +141,21 @@ def test_manual_trunk_from_user_is_saved_and_defaults_to_number(home, mode, numb
         assert line.caller_id is None
 
 
+@pytest.mark.parametrize("mode", ["number", "account"])
+def test_manual_trunk_preserves_provider_supplied_username(home, monkeypatch, mode):
+    monkeypatch.setattr("ai_phone.cli_lines._provider", lambda *a: pytest.fail("manual setup must not contact a carrier"))
+    username = "Office_user.2-west"
+    args = ["lines", "add", "trunk", "--id", "byo", "--registrar", "sip:trunk.example.org",
+            "--user", username, "--password-env", "BYO_PW", "--from-user", mode]
+    if mode == "number":
+        args += ["--number", "+15555550100"]
+    assert main(args) == 0
+    line = load_config(home / "config.yaml").lines["byo"]
+    assert line.user == username
+    assert line.from_user == mode
+    assert line.caller_id == ("+15555550100" if mode == "number" else None)
+
+
 @pytest.mark.parametrize("provider", ["sip", "fake", "telnyx", "twilio"])
 @pytest.mark.parametrize("mode", ["number", "account"])
 def test_from_user_option_refuses_non_manual_trunks_before_provider_access(home, monkeypatch, capsys, provider, mode):

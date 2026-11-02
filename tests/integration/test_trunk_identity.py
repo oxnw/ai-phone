@@ -21,7 +21,6 @@ from tests.integration.ports import PEER_PORT, SIP_PORT, rtp_range
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
-ACCOUNT = "trunktestuser"
 PASSWORD = "loopback-only-not-a-secret"
 NUMBER = "+15555550100"
 TARGET = "+15555550199"
@@ -106,11 +105,11 @@ def _from_user(headers):
     return match[1]
 
 
-def _digest(header, method, uri, nonce):
+def _digest(header, method, uri, nonce, account):
     assert header.startswith("Digest "), header
     fields = {key: quoted or plain for key, quoted, plain in re.findall(
         r'(\w+)\s*=\s*(?:"([^"\\]*)"|([^,\s]+))', header[7:])}
-    assert fields["username"] == ACCOUNT and fields["realm"] == REALM, fields
+    assert fields["username"] == account and fields["realm"] == REALM, fields
     assert fields["uri"] == uri and fields["nonce"] == nonce, fields
     assert fields.get("algorithm", "MD5").upper() == "MD5", fields
     assert fields["qop"] == "auth" and fields["cnonce"] and len(fields["nc"]) == 8, fields
@@ -118,14 +117,15 @@ def _digest(header, method, uri, nonce):
     def md5(text):
         return hashlib.md5(text.encode()).hexdigest()
 
-    expected = md5(":".join((md5(f"{ACCOUNT}:{REALM}:{PASSWORD}"), nonce,
+    expected = md5(":".join((md5(f"{account}:{REALM}:{PASSWORD}"), nonce,
                              fields["nc"], fields["cnonce"], "auth", md5(f"{method}:{uri}"))))
     assert hmac.compare_digest(fields["response"], expected), "invalid SIP digest response"
 
 
 class TrunkPeer:
-    def __init__(self, sock, required_user, wire_log):
+    def __init__(self, sock, account, required_user, wire_log):
         self.sock, self.required_user, self.wire_log = sock, required_user, wire_log
+        self.account = account
         self.registered = False
         self.unregistered = False
         self.invites = []
@@ -163,9 +163,9 @@ class TrunkPeer:
                 self.respond(address, headers, 401 if registration else 407, [
                     f'{name}: Digest realm="{REALM}", nonce="{nonce}", algorithm=MD5, qop="auth"'])
                 return
-            _digest(headers[auth_name], method, uri, nonce)
+            _digest(headers[auth_name], method, uri, nonce, self.account)
             if registration:
-                assert _from_user(headers) == ACCOUNT
+                assert _from_user(headers) == self.account
                 expiry = headers.get("expires", "300")
                 self.unregistered |= expiry == "0" or ";expires=0" in headers["contact"]
                 self.registered |= not self.unregistered
@@ -220,7 +220,8 @@ def _cleanup(proc):
 
 @pytest.mark.parametrize("from_user", ["number", "account"])
 @pytest.mark.parametrize("required_identity", ["number", "account"])
-def test_registered_trunk_authentication_and_from_policy(tmp_path, from_user, required_identity):
+@pytest.mark.parametrize("account", ["trunktestuser", "trunk.test_user-1"])
+def test_registered_trunk_authentication_and_from_policy(tmp_path, from_user, required_identity, account):
     assert 5060 not in range(SIP_PORT, PEER_PORT + 1), "Set AI_PHONE_TEST_SIP_PORT=5080"
     for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
         with socket.socket(socket.AF_INET, kind) as probe:
@@ -234,7 +235,7 @@ def test_registered_trunk_authentication_and_from_policy(tmp_path, from_user, re
     config.write_text(
         f"sip:\n  bind: {{address: '127.0.0.1', udp_port: {SIP_PORT}, tcp_port: {SIP_PORT}, tls_port: {SIP_PORT + 1}}}\n"
         f"rtp: {{port_min: {low}, port_max: {high}}}\n"
-        f"lines:\n  trunk:\n    kind: trunk\n    user: {ACCOUNT}\n    number: '{NUMBER}'\n"
+        f"lines:\n  trunk:\n    kind: trunk\n    user: {account}\n    number: '{NUMBER}'\n"
         f"    registrar: sip:127.0.0.1:{PEER_PORT}\n    dial_domain: 127.0.0.1:{PEER_PORT}\n"
         f"    from_user: {from_user}\n    password_env: AI_PHONE_TEST_TRUNK_PASSWORD\n"
         f"log:\n  dir: '{tmp_path}'\n  pjsip_level: 4\n")
@@ -246,7 +247,7 @@ def test_registered_trunk_authentication_and_from_policy(tmp_path, from_user, re
             (tmp_path / "sip.log").open("w") as wire_log:
         sock.bind(("127.0.0.1", PEER_PORT))
         sock.settimeout(0.1)
-        peer = TrunkPeer(sock, NUMBER if required_identity == "number" else ACCOUNT, wire_log)
+        peer = TrunkPeer(sock, account, NUMBER if required_identity == "number" else account, wire_log)
         proc = subprocess.Popen([sys.executable, str(runner), str(config), str(result)],
                                 cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT,
                                 start_new_session=True)
@@ -262,7 +263,7 @@ def test_registered_trunk_authentication_and_from_policy(tmp_path, from_user, re
                     peer.handle(packet.decode(), address)
             assert proc.returncode == 0, log.read_text()
             assert peer.registered and peer.unregistered
-            assert peer.invites and set(peer.invites) == {NUMBER if from_user == "number" else ACCOUNT}
+            assert peer.invites and set(peer.invites) == {NUMBER if from_user == "number" else account}
             events = json.loads(result.read_text())
             progress = [event for event in events if event["type"] == "OutboundProgress"]
             assert progress[0]["state"] == "dialling", events

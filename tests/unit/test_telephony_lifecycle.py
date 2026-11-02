@@ -104,3 +104,64 @@ async def test_old_queued_ended_cleanup_does_not_cancel_the_next_calls_timer():
         old_timer.cancel()
         new_timer.cancel()
         tel.release_call(7)
+
+
+@pytest.mark.asyncio
+async def test_media_clock_stops_while_port_and_callback_resources_are_alive():
+    tel = telephony()
+    order = []
+
+    class Resource:
+        pass
+
+    class Port:
+        def __init__(self, rx, tx):
+            self.rx, self.tx, self.echo = rx, tx, Resource()
+
+    tel.rx, tel.tx = Resource(), Resource()
+    tel.port = Port(tel.rx, tel.tx)
+    refs = {name: weakref.ref(value) for name, value in
+            (("port", tel.port), ("rx", tel.rx), ("tx", tel.tx), ("echo", tel.port.echo))}
+    weakref.finalize(tel.port, order.append, "port destroyed")
+
+    class MediaEndpoint:
+        def audDevManager(self):
+            return self
+
+        def setNoDev(self):
+            assert all(ref() is not None for ref in refs.values())
+            assert refs["port"]().rx is refs["rx"]()
+            assert refs["port"]().tx is refs["tx"]()
+            assert refs["port"]().echo is refs["echo"]()
+            order.append("clock stopped")
+
+        def libDestroy(self):
+            assert refs["port"]() is None and refs["echo"]() is None
+            assert refs["rx"]() is not None and refs["tx"]() is not None
+            order.append("endpoint destroyed")
+
+    tel.ep = MediaEndpoint()
+    call = Call(7)
+    weakref.finalize(call, order.append, "call destroyed")
+    assert tel.try_claim_call(call)
+    del call
+
+    tel.stop()
+
+    assert order == ["call destroyed", "clock stopped", "port destroyed", "endpoint destroyed"]
+    assert tel.ep is None and tel.port is None
+    tel.stop()
+    assert order == ["call destroyed", "clock stopped", "port destroyed", "endpoint destroyed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint_created", [False, True])
+async def test_shutdown_before_media_port_creation_needs_no_audio_manager(endpoint_created):
+    tel = telephony()
+    order = []
+    if endpoint_created:
+        tel.ep = Endpoint(order, lambda: None)  # deliberately has no audDevManager
+    tel.stop()
+    tel.stop()
+    assert order == (["endpoint destroyed"] if endpoint_created else [])
+    assert tel.ep is None and tel.port is None

@@ -713,8 +713,9 @@ def test_a_bad_trunk_leaves_no_secret_behind(home):
     assert "AI_PHONE_LINE_TRUNK_PASSWORD" not in load_secrets()
     assert raw(home) == {"lines": {}}
     with pytest.raises(ActionError, match="user"):
-        a.add_trunk_line("sip:sip.example.com", "a", "pw-SECRET", "+15550100000", "udp")
+        a.add_trunk_line("sip:sip.example.com", "bad user", "pw-SECRET", "+15550100000", "udp")
     assert "AI_PHONE_LINE_TRUNK_PASSWORD" not in load_secrets()
+    assert raw(home) == {"lines": {}}
 
 
 # ---- voice -----------------------------------------------------------------------------------

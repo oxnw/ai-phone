@@ -26,8 +26,7 @@ class ConfigError(ValueError):
 
 
 LINE_ID_RE = re.compile(r"^[a-z0-9-]{1,32}$")
-USER_RE = re.compile(r"^[A-Za-z0-9]{4,32}$")          # trunk credentials: what Telnyx and Twilio accept
-SIP_USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")     # sip lines: the user part of an AOR
+SIP_USER_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")     # plain SIP URI usernames; no escaping needed
 E164_RE = re.compile(r"^\+[1-9][0-9]{6,14}$")
 ENV_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 CLI_RE = re.compile(r"^[A-Za-z0-9._~/-]{1,256}$")     # brain.cli: a name to look for on PATH, or a path to one
@@ -468,10 +467,8 @@ def validate_config(cfg: Config, env: Mapping[str, str] | None = None) -> list[s
         tls_proxy_hostname(ln, p)
         _require(ln.from_user in ("number", "account"), f"{p}.from_user: expected number or account")
         _require(ln.kind == "trunk" or ln.from_user == "number", f"{p}.from_user: account is only valid on a trunk line")
-        if ln.kind == "trunk":
-            _require(bool(USER_RE.fullmatch(ln.user)), f"{p}.user: must match {USER_RE.pattern} (letters and digits, 4 to 32)")
-        else:
-            _require(bool(SIP_USER_RE.fullmatch(ln.user)), f"{p}.user: must match {SIP_USER_RE.pattern}")
+        _require(bool(SIP_USER_RE.fullmatch(ln.user)),
+                 f"{p}.user: must match {SIP_USER_RE.pattern} (letters, digits, dots, underscores or hyphens, 1 to 64)")
         _require(bool(DISPLAY_RE.fullmatch(ln.display_name)), f"{p}.display_name: printable ASCII, 1 to 64 characters, no quotes or backslashes")
         _require(ln.srtp == "off" or ln.transport == "tls", f"{p}.srtp: SRTP needs transport: tls")
         if ln.password_env is not None:
